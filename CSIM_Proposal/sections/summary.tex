@@ -1,0 +1,61 @@
+\subsection{2 Brief Summary Of Existing Work}
+
+% ====================================================================
+% SUBHEADING 1: Representation Of Agents
+% ====================================================================
+
+\subsubsection{2.1 Representation Of Agents}
+The geometric abstraction of an agent forms the foundation of collision detection and navigational realism in crowd simulation systems.
+
+\vspace{0.5em}
+\textbf{Disc-based Representation}\\
+Large-scale crowd simulations commonly represent agents as 2D discs due to their computational simplicity and ease of integration into velocity- and constraint-based frameworks. Collision detection reduces to distance checks, enabling efficient scalability. However, discs exhibit rotational symmetry and therefore cannot capture orientation-dependent behaviors such as torso rotation or shoulder alignment in confined spaces. To prevent overlap, disc radii must approximate full shoulder width, which can overestimate the true spatial footprint of pedestrians and lead to artificial congestion in narrow corridors.
+
+\vspace{0.5em}
+\textbf{Non-disc Representations (Ellipses and EOBBs)}\\
+To improve geometric fidelity, researchers have explored elliptical agents that better approximate the human body profile. While more realistic than discs, ellipses introduce more complex collision detection procedures and may rely on precomputed Minkowski sums that do not scale easily to heterogeneous agent sizes. Extended Oriented Bounding Boxes (EOBBs) provide another refinement by incorporating orientation and instantaneous motion into the bounding volume. These representations support efficient broad-phase detection in dense scenes while preserving directional information.
+
+\vspace{0.5em}
+\textbf{Torso-based Representation (Capsules)}\\
+Recent work proposes capsule-based abstractions that model agents as 2D torsos rather than symmetric discs \cite{Talukdar2025}. Capsule representations allow agents to rotate within constrained spaces, reflecting empirical observations that pedestrians adjust orientation as corridor width decreases. Compared to disc models, torso-based approaches better capture local interactions while maintaining computational feasibility for large multi-agent systems.
+
+% ====================================================================
+% SUBHEADING 2: Approaches To Crowd Dynamics
+% ====================================================================
+
+
+\subsubsection{2.2 Approaches To Crowd Dynamics}
+Beyond geometry, the modeling of agent motion and interaction has evolved significantly.
+
+\vspace{0.5em}
+\textbf{Force-based and Social Force Models}\\
+Early approaches treat agents as particles influenced by attractive and repulsive forces. The Social Force Model formalizes pedestrian behavior as the superposition of goal-directed and inter-agent forces \cite{Helbing1995}. While intuitive and effective in moderately dense settings, force-based models often require small time steps for numerical stability and may exhibit oscillatory behavior under high-density conditions.
+
+\vspace{0.5em}
+\textbf{Data-driven and Learning-based Methods}\\
+More recent techniques leverage trajectory data or learning-based approaches to reproduce observed pedestrian motion patterns. Although these methods can capture complex behaviors, they typically require substantial training data and computational resources. In addition, generalization to unseen environments or structural changes remains challenging.
+
+\vspace{0.5em}
+\textbf{Position-Based Dynamics (PBD)}\\
+Position-Based Dynamics provides a constraint-based alternative to force integration. Instead of computing forces and accelerations, PBD iteratively projects spatial constraints directly onto agent positions using a nonlinear Gauss-Seidel-like process \cite{WEISS201912, WeissImp2019}. This formulation offers strong numerical stability and allows larger time steps compared to traditional force-based solvers. Modern PBD crowd implementations incorporate short-range collision constraints, anticipatory avoidance mechanisms based on Time-to-Collision (TTC), and group cohesion techniques. With appropriate spatial acceleration, PBD has demonstrated real-time scalability to large crowds. However, the cost of constraint projection remains dependent on local agent density.
+
+% ====================================================================
+% SUBHEADING 3: Computational Optimization
+% ====================================================================
+
+\subsubsection{2.3 Computational Optimization}
+Maintaining real-time performance for large crowds requires minimizing both neighbor query cost and per-agent computation.
+
+\vspace{0.5em}
+\textbf{Spatial Partitioning}\\
+Naïve collision detection scales quadratically with the number of agents. To reduce this cost, simulations employ spatial data structures such as quadtrees, k-d trees, and uniform grids. Comparative analysis indicates that regular grids combined with spatial hashing are particularly well suited for dynamic crowd simulation, as they provide efficient cell lookup and avoid expensive hierarchical updates as agents move \cite{Bo2014}. While spatial partitioning reduces neighbor search overhead, it does not decrease the number of constraints that must be resolved in densely clustered regions.
+
+\vspace{0.5em}
+\textbf{Level of Detail (LOD) and Foveation}\\
+Traditional Level of Detail techniques reduce geometric or animation complexity for distant agents to lower rendering cost. A perceptually motivated extension is foveated animation, which exploits reduced sensitivity to motion in peripheral vision \cite{Stancu2025}. By lowering animation fidelity or update frequency outside the viewer's central field of view, computational savings can be achieved without noticeable degradation in perceived quality. These approaches primarily address rendering efficiency rather than constraint-solving complexity.
+
+% ====================================================================
+
+\subsection{3 Transition to Our Work}
+
+Although advances in geometry, dynamics, and rendering optimization have significantly improved crowd simulation, comparatively little work has explored adaptive reduction of constraint-solving cost within dense clusters. This limitation motivates the Computational Level of Detail (C-LOD) framework proposed in this work, which integrates Adaptive Spatial Clustering directly into the PBD constraint resolution stage.

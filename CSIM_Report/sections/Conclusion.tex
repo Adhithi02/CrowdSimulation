@@ -1,0 +1,97 @@
+% 10. Conclusion
+\section{Conclusion}
+
+This project addressed the long-standing tension between physical
+realism and real-time performance in dense crowd simulation.  Position-
+Based Dynamics offers stable, anticipatory collision handling, but its
+computational cost is dominated by the local interaction density of the
+crowd---precisely the regime in which large-scale simulations are most
+interesting.  Existing CLOD strategies for crowd simulation reduce
+work by allocating fidelity according to camera distance, an inheritance
+from rendering LOD that is poorly suited to the physics layer because
+the cost of resolving a contact does not depend on how far away the
+contact is.
+
+We built a Unity-based crowd simulator that exposes seven solver
+backends sharing a common scene, agent representation, and NavMesh
+steering pipeline.  The central contribution is \textit{PBDcmp}, a
+GPU compute-shader PBD solver in which physics fidelity is allocated
+by a \emph{density-driven} continuous level-of-detail system.  The
+density field is read directly from the per-bucket counter of the
+spatial hash that the solver already maintains for neighbour search,
+so density-aware LOD assignment requires no extra buffer, no extra
+kernel pass, and no additional memory traffic.  LOD assignment runs
+fully in parallel on the GPU, every agent resolves its constraints on
+every frame (eliminating frame-offset stuttering), and asynchronous
+GPU readback with version-guarded callbacks keeps the main thread
+free of physics stalls.
+
+In the adversarial \textit{Bottleneck} test scene at populations of
+10--500 agents, the compute solver produced the highest frame rate
+and the lowest solver-only cost at every tested population.  At 500
+agents it ran at 1001~FPS---$2.07\times$ faster than the
+single-threaded Social Force baseline and $7.0\times$ faster than the
+single-threaded PBD baseline.  Comparing the parallel-no-LOD baseline
+against the full density-driven CLOD pipeline showed a 38\% reduction
+in solver cost and a 43\% improvement in end-to-end frame rate from
+LOD alone.  Quality cost was minimal: the spatial fidelity reduction
+is invisible at typical viewing distances and self-correcting when
+clusters densify, in contrast to the temporal stuttering produced by
+camera-distance frame-skipping CLOD.
+
+The main takeaway is that density---rather than camera distance---is
+the right signal for allocating physics fidelity in a crowd, and that
+the data structure required to make this decision is already paid for
+by the spatial hash that any reasonable PBD implementation must
+maintain.  Density-driven CLOD is therefore not only effective but
+essentially free, and combining it with a GPU compute backend yields a
+crowd solver that is both faster and visually smoother than every CPU
+alternative we tested.
+
+\subsection{Future Work}
+\label{sec:future}
+
+Several directions naturally extend this work:
+
+\begin{itemize}[topsep=2pt,itemsep=2pt]
+    \item \textbf{Adaptive thresholds.}  The current density
+    thresholds $D_{\mathrm{high}}$ and $D_{\mathrm{med}}$ are fixed
+    constants tuned by hand.  Adapting them per-frame to match a
+    target solver-cost budget---similar to the adaptive radius
+    heuristic in \textit{PBDCLODJobs}---would let the solver shed load
+    automatically when the GPU is under pressure from another stage of
+    the application.
+
+    \item \textbf{Larger-scale validation.}  All measurements were
+    collected at populations of 10--500 agents.  The compute solver's
+    headroom (still above 1000~FPS at 500 agents) suggests it should
+    scale to several thousand agents on the same hardware, but
+    confirming this requires test scenes large enough to host the
+    larger populations and a profiler harness that automates the sweep.
+
+    \item \textbf{Wider scene library.}  The \textit{Bottleneck} scene
+    deliberately stresses contact density, but it is a single scene.
+    Open plazas, branching corridors, and multi-bottleneck layouts
+    would each exercise the LOD system differently and would either
+    confirm or qualify the present results.
+
+    \item \textbf{Integration with perceptual CLOD.}  Density-driven
+    physics LOD is orthogonal to perceptual animation
+    LOD~\cite{stancu}.  A hybrid system that uses density to drive
+    the solver and gaze direction or eccentricity to drive the
+    skinning pipeline would compound the savings of both techniques
+    and would be a natural extension for VR or head-mounted display
+    deployments where gaze data is available.
+
+    \item \textbf{Group behaviour.}  The current LOD treats every
+    agent independently.  Promoting an agent to the \textsc{High} tier
+    when one of its socially-linked group members is already in
+    \textsc{High} would let the system preserve coherent group
+    behaviour even when only part of the group is in a dense pocket.
+
+    \item \textbf{Ablation study.}  The compute solver gains its
+    speedup from three compounding sources (GPU dispatch, LOD-induced
+    work reduction, and elimination of the serial LOD-assignment
+    pass).  An ablation that disables each in turn would quantify
+    their individual contributions and guide further optimisation.
+\end{itemize}

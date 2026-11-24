@@ -1,0 +1,105 @@
+% 6. Novelty of the Approach.
+\section{Novelty of the Approach}
+
+This project combines several individually known techniques---position-based
+dynamics, GPU compute dispatch, and continuous level-of-detail crowd
+simulation---into a unified real-time pipeline whose specific design choices
+constitute the novel contribution.  This section identifies each distinct
+novelty and explains why it is non-trivial.
+
+\subsection{Density-Driven Physics LOD via the Spatial Hash}
+
+The most significant novelty is the use of the spatial hash occupancy count as
+a real-time density heatmap that drives physics fidelity allocation.  Prior
+CLOD systems for crowd simulation universally determine LOD tier from the
+agent's distance to a camera or focus point~\cite{ulicny2001,helbing1995}.
+This approach is intuitive for rendering LOD---objects further away need fewer
+polygons---but is poorly motivated for physics: a dense cluster of agents one
+hundred metres from the camera still generates as many collision contacts as
+the same cluster at ten metres, and resolving them correctly is equally
+important for plausible crowd behaviour.  Conversely, a lone agent directly in
+front of the camera in an open area generates no contacts regardless of solver
+fidelity.
+
+The density heatmap approach inverts this relationship.  Physics fidelity is
+allocated where the solver has the most work to do: dense regions receive the
+full $3\times 3$ neighbourhood search and up to twelve contact resolutions per
+Jacobi pass, while sparse regions use only a centre-cell lookup with a single
+contact.  This is both physically motivated and computationally efficient.
+
+Critically, the density field is obtained at no extra cost.  The
+\texttt{KernelHashAgents} kernel must atomically insert every agent into the
+spatial hash regardless of any LOD system; the per-bucket counter that enables
+this insertion is the density value.  No second pass, no additional buffer, and
+no extra kernel are required.  A single additional read of
+\texttt{\_HashGridCount[h]} inside \texttt{KernelAssignLOD} is sufficient to
+assign the LOD tier.
+
+\subsection{GPU-Native LOD Assignment}
+
+In existing CPU-side implementations (including our own \textit{PBDCLODJobs}
+variant), LOD tier assignment runs as a single-threaded \texttt{IJob} on the
+CPU before the parallel constraint jobs are dispatched.  This introduces a
+serial bottleneck that grows with agent count: the categorisation pass cannot
+be parallelised over the CPU job system without expensive atomic writes into
+shared index lists.
+
+The compute shader implementation moves the entire LOD classification onto the
+GPU.  \texttt{KernelAssignLOD} runs as a fully parallel dispatch---one thread
+per agent---with no synchronisation other than the implicit barrier between
+compute dispatches.  Each thread reads two integers (the agent's cell
+coordinates and the bucket count) and writes one (the \texttt{lodLevel} field
+into the agent buffer).  The kernel is latency-bound rather than
+bandwidth-bound, giving the GPU scheduler maximum freedom to interleave it with
+other work.
+
+\subsection{Elimination of Frame-Offset Skipping}
+
+Camera-distance CLOD systems commonly save computation for distant agents by
+resolving their constraints only every $k$-th frame (in our \textit{PBDCLODJobs}
+implementation, $k = 4$ for the \textsc{Low} tier).  While effective in terms
+of raw throughput, this technique introduces visible temporal artefacts: agents
+that skip constraint resolution accumulate penetration over the skipped frames,
+producing a characteristic stuttering or ``popping'' motion that is especially
+noticeable when those agents re-enter the camera's high-LOD zone.
+
+The density-driven system eliminates frame-offset skipping entirely.  Every
+agent resolves its constraints on every frame.  The computational savings come
+instead from reducing the \emph{scope} of the constraint solve---search radius
+and contact count---rather than its \emph{frequency}.  Because the spatial hash
+is already built as part of the pipeline, the marginal cost of dispatching a
+low-tier constraint thread is small: the thread exits after checking at most
+one contact in a single bucket.  The result is smoother motion for all agents
+at a modest increase in per-frame GPU occupancy.
+
+\subsection{Single-Buffer Density Map with No Memory Overhead}
+
+A predictive density map that is computed before LOD assignment and then reused
+for neighbour lookup during constraint resolution would ordinarily require an
+extra buffer and an extra kernel pass.  Our implementation avoids this by
+recognising that the spatial hash count array already serves all three
+purposes: atomic counter during hashing, density heatmap during LOD assignment,
+and neighbourhood index during constraint resolution.  The
+\texttt{\_HashGridCount} buffer is read in three separate kernels with no
+intervening writes, so no copies or redundant allocations are needed.
+% TODO: Quantify the memory saving relative to a naive two-buffer design
+%       once final agent counts are fixed (N agents x 4 bytes per density entry).
+
+\subsection{Asynchronous Readback with Version-Guarded Callbacks}
+
+The \texttt{AsyncGPUReadback} API allows the GPU to continue rendering the
+next frame while the previous frame's simulation results are transferred to the
+CPU.  This decouples the physics timestep from the main-thread stall that would
+result from a synchronous \texttt{GetData} call.  The one- to two-frame lag
+in NavMesh position updates is imperceptible at interactive frame rates because
+NavMesh pathfinding operates on a planning horizon of many frames.
+
+The version counter guards against a subtle race condition: if the simulation
+is respawned (e.g., because the user switched solver mode or changed the agent
+count) between the \texttt{AsyncGPUReadback.Request} call and the callback
+firing, the callback would apply stale agent data from the old simulation to
+the new agent list.  The counter---incremented on every \texttt{Init}---is
+captured at request time and compared inside the callback; a mismatch causes
+the callback to return immediately without modifying any state.  To our
+knowledge this guard pattern is not described in existing Unity compute shader
+tutorials or documentation.

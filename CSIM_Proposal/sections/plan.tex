@@ -1,0 +1,106 @@
+
+\section{Project Plan}
+\subsection{4 What You Plan To Do}
+This project aims to build a player-centric crowd simulator that maintains perceptual realism while maximising runtime 
+efficiency and frame-rate. The core idea is to reduce or approximate expensive per-agent computations as a function of the 
+agent's perceptual importance to the player (distance, screen-space size, in-frustum/gaze, occlusion). The system will hybridise: 
+(1) a robust near-field microscopic solver (position-based dynamics on capsule/torsos), 
+(2) an efficient broad-phase spatial partitioning, 
+(3) perceptual LOD / foveated animations for mid- and far-field agents, and 
+(4) cheap continuum/flow proxies for very distant aggregates.
+
+\subsubsection{4.1 Research questions and objectives}
+\begin{itemize}[itemsep=0pt]
+  \item \textbf{RQ1:} How much CPU/GPU can be saved by applying player-centred LOD/foveation while remaining perceptually indistinguishable from a full-detail simulator?
+  \item \textbf{RQ2:} Which combination of (grid / quadtree) spatial partitioning and PBD micro-solver gives the best performance/quality trade-off in interactive scenes?
+  \item \textbf{RQ3:} How to smoothly and cheaply transition agents between microscopic agent-based simulation and macroscopic continuum/flow approximations with minimal popping/artifacts?
+\end{itemize}
+
+\subsubsection{4.2 Related methods (short mapping to source papers)}
+\begin{itemize}[itemsep=0pt]
+  \item \textbf{Position-based crowd simulation:} use PBD-style constraint solver for near-field agent interactions and stability under dense conditions \cite{WEISS201912,WeissImp2019}. 
+  \item \textbf{Capsule/torso agent geometry:} adopt 2D capsule/torsos for better collision geometry and orientation realism \cite{Talukdar2025}.
+  \item \textbf{Foveated/perceptual LOD:} reduce update/animation rates based on agent importance \cite{Stancu2025}.
+  \item \textbf{Spatial partitioning:} use Li's empirical guidelines to choose and tune grid / spatial hash vs hierarchical structures \cite{Bo2014}.
+  \item \textbf{Group dynamics and continuum proxies:} compute low-frequency group planners and flow-field proxies to cheaply approximate far-field motion \cite{Saeed2022}.
+\end{itemize}
+
+\subsection{5 Implementation plan 5 Labs}
+Each lab is planned as a development and evaluation sprint; durations are estimates and can be adjusted to fit your schedule.
+
+\subsubsection*{5.1 Lab 1: Prototype skeleton \& baseline}
+\textbf{Objective:} create minimal engine scaffolding and a baseline agent simulation for comparisons.\\
+\textbf{Tasks:}
+\begin{enumerate}[itemsep=0pt]
+  \item Create project repo and engine scaffold (Unity / Unreal / C++ framework).
+  \item Implement simple agent: point or disc agents with steering/goals.
+  \item Implement broad-phase spatial partition (regular grid / spatial hash).
+  \item Add profiler instrumentation (frame time, neighbor-query time, solver time).
+\end{enumerate}
+\textbf{Deliverables:}
+\begin{itemize}[itemsep=0pt]
+  \item Working baseline demo scene with N agents and reporting metrics (FPS, timings).
+  \item Baseline graphs (FPS vs agent count).
+\end{itemize}
+
+\subsubsection*{5.2 Lab 2: PBD micro-solver \& capsule agents}
+\textbf{Objective:} implement a position–based dynamics micro-solver and switch agent geometry from discs to 2D capsules/torso.\\
+\textbf{Tasks:}
+\begin{enumerate}[itemsep=0pt]
+  \item Implement PBD constraint loop (positional projection, contact constraints).
+  \item Implement capsule collision detection and constraint formulation.
+  \item Tune number of solver iterations and time-step for stability.
+  \item Compare PBD vs a simple social-force / RVO baseline on dense scenes.
+\end{enumerate}
+\textbf{Deliverables:}
+\begin{itemize}[itemsep=0pt]
+  \item Demo showing dense crowd with capsule agents that remain stable and non-penetrating.
+  \item Quantitative comparison: penetration depth, collision rate, solver time.
+\end{itemize}
+
+\subsubsection*{5.3 Lab 3: Perceptual LOD / Foveation}
+\textbf{Objective:} implement player-centric importance scoring and LOD schemes (update frequency reduction, frozen/peripheral states, degraded behavior proxies).\\
+\textbf{Tasks:}
+\begin{enumerate}[itemsep=0pt]
+  \item Define importance score (distance, screen-space size, frustum/gaze, time-to-collision, occlusion heuristics).
+  \item Implement variable update frequency framework and animation throttling.
+  \item Implement smooth re-activation blending to avoid popping.
+  \item Tune perceptual thresholds using pilot tests.
+\end{enumerate}
+\textbf{Deliverables:}
+\begin{itemize}[itemsep=0pt]
+  \item Foveated demo with toggles (full vs foveated).
+  \item Performance charts showing CPU saved and subjective notes from pilot testers.
+\end{itemize}
+
+\subsubsection*{5.4 Lab 4: Group dynamics \& far-field proxies}
+\textbf{Objective:} add low-frequency group planners and continuum / flow-field approximations for large distant crowds; implement transitions.\\
+\textbf{Tasks:}
+\begin{enumerate}[itemsep=0pt]
+  \item Implement group data structures and low-frequency group planners (leader-follow, cohesion constraints).
+  \item Implement a simple macroscopic flow-field solver or particle density proxy for far-field motion.
+  \item Implement blending rules between microscopic agents and flow proxies (interpolation region).
+  \item Run ablation tests to measure perceptual and behavioral differences.
+\end{enumerate}
+\textbf{Deliverables:}
+\begin{itemize}[itemsep=0pt]
+  \item Scenes demonstrating coherent groups and far-field aggregate motion.
+  \item Ablation data: group cohesion metrics and perception notes.
+\end{itemize}
+
+\subsubsection*{5.5 Lab 5: Optimization, parallelisation \& evaluation}
+\textbf{Objective:} optimise the system, parallelise heavy passes, run final experiments and a small perceptual study.\\
+\textbf{Tasks:}
+\begin{enumerate}[itemsep=0pt]
+  \item Move broad-phase and independent agent updates to worker threads / GPU where applicable.
+  \item Tune grid cell size, batching, and solver budgets for target FPS (e.g. 60 FPS).
+  \item Design and run final quantitative experiments (microbenchmarks, scalability curves).
+  \item Conduct a perceptual A/B study (full-detail vs foveated/LOD) with N participants (suggest 20--40 for initial results).
+  \item Write final report and prepare demo video.
+\end{enumerate}
+\textbf{Deliverables:}
+\begin{itemize}[itemsep=0pt]
+  \item Performance report: FPS vs N agents, per-component timings, 95th percentile frame times.
+  \item Perceptual study results (statistics, subjective ratings).
+  \item Final prototype, code, and demo video.
+\end{itemize}

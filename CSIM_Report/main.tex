@@ -1,0 +1,68 @@
+\documentclass{CSIM}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{subcaption}
+\usepackage{hyperref} % Added for email links on the title page
+\usepackage{amsmath}
+\usepackage{cleveref}
+
+\graphicspath{{./img/}}
+\begin{document}
+
+% Includes project title, team members, course, instructor, date, and subtitle placeholder.
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    
+    {\Huge \bfseries Adaptive Spatial Clustering in Position-Based Dynamics for Real-Time Crowd Simulation \par}
+    \vspace{0.75cm}
+    
+    {\Large \textit{A Compute Shader-Based PBD Crowd Simulator with Computational Level of Detail} \par}
+    
+    \vspace{2.5cm}
+    
+    {
+    Heena Kamani \\ \href{mailto:hkamani@ualberta.ca}{hkamani@ualberta.ca} \\[0.5cm]
+    Hyunsung Rho \\ \href{mailto:hrho@ualberta.ca}{hrho@ualberta.ca} \\[0.5cm]
+    Tom Jongeleen \\ \href{mailto:tjongele@ualberta.ca}{tjongele@ualberta.ca} \par
+    }
+    
+    \vspace{1.5cm}
+    
+    % GitHub Repository Section
+    {\small \textbf{GitHub Repository:}} \\
+    {\small \url{https://github.com/tjong03/Csim-prj-2026}} \par
+    
+    \vspace{2.0cm}
+    
+    {\large \textbf{Course:} CMPUT 414 - Introduction to Multimedia Technology\par}
+    \vspace{0.5cm}
+    {\large \textbf{Instructor:} Dr. Anup Basu \par}
+    \vspace{0.5cm}
+    {\large \textbf{Date:} \today \par} % Or replace \today with a specific date
+    
+    \vfill
+\end{titlepage}
+
+
+\input{sections/Intro}
+\input{sections/RelatedWork}
+\input{sections/Method}
+\input{sections/Novelty.tex}
+\input{sections/Experiment}
+\input{sections/Conclusion}
+
+
+% % E. References Cited
+
+\newpage
+\renewcommand\refname{References Cited}
+
+
+% IEEE bibliography style. 
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
+

@@ -1,0 +1,29 @@
+\subsection{Perception and Computational Scalability}
+\label{sec:perception}
+
+Real-time crowd simulation remains a central challenge in computer graphics due to the rapidly increasing computational cost of inter-agent interactions as density grows. While substantial progress has been made in geometric modeling, motion realism, and rendering optimization, comparatively fewer works address adaptive reduction of constraint-solving complexity within dense agent clusters. This section examines perception-based strategies in crowd simulation, with particular emphasis on their relationship to computational scalability.
+
+\subsubsection{Perception and Computational Importance}
+
+Perception has been incorporated into crowd simulation in two primary ways: as a cognitive model influencing agent behavior, and as a perceptual optimization mechanism guiding computational resource allocation.
+
+\paragraph{Agent-Centric Perception Models}
+Hierarchical perception models integrate visual, auditory, and tactile filtering with memory structures \cite{Sun2008Hierarchical}. In these systems, perception is processed in stages: sensory filtering, short-term memory storage, long-term memory accumulation, and behavioral interpretation.
+
+Research demonstrates that perceptual range varies with crowd density. Occlusion and psychological stress reduce effective sensory range in high-density conditions, influencing navigation behavior and evacuation dynamics \cite{Sun2008Hierarchical}. Selective attention mechanisms prioritize stimuli based on objective features (distance, velocity) and subjective traits (personality, risk tolerance) \cite{Macklin2014Unified, Sun2008Hierarchical}. While such cognitive perception models enhance behavioral realism, they primarily affect decision-making rather than computational complexity within physics solvers.
+
+\paragraph{Viewer-Centric Perceptual LOD}
+A separate line of work exploits limitations of human visual perception to reduce computational cost. Perceptual Level of Detail techniques lower geometric or animation fidelity for agents deemed visually less important, often based on distance, screen-space size, or gaze direction \cite{Reddy2001Perceptual}.
+
+Foveated animation approaches allocate higher update rates within the viewer's central field of view and reduce update frequency in peripheral regions \cite{Reddy2001Perceptual}. These techniques yield substantial rendering savings while maintaining perceptual plausibility. However, they predominantly target animation and rendering pipelines rather than the constraint-resolution stage of physics-based solvers. Thus, existing perceptual optimization strategies reduce visual computation but do not directly address the density-dependent growth of constraint-solving cost.
+
+\paragraph{Summary of Perception Research}
+Perception modeling contributes to both behavioral realism and perceptual optimization. Agent-centric models introduce cognitive constraints that influence navigation decisions, while perceptual LOD techniques reduce rendering workload based on viewer importance. Nevertheless, current approaches rarely integrate perceptual importance directly into the dynamics layer. In particular, few methods adapt constraint resolution fidelity within physics-based solvers according to perceptual significance.
+
+\subsubsection{Synthesis and Research Gap}
+
+%The preceding review highlights a structural gap in the literature. While PBD provides stable and scalable collision handling, its computational cost remains proportional to local interaction density. Perceptual LOD methods reduce animation and rendering expense but do not reduce the number or complexity of constraint projections in dense regions. Consequently, there is limited exploration of frameworks that dynamically adjust constraint-solving fidelity based on perceptual importance and spatial clustering.
+%
+%This gap motivates the development of a Computational Level of Detail (C-LOD) framework that integrates Adaptive Spatial Clustering directly into the PBD constraint resolution stage. By clustering agents spatially and modulating constraint fidelity according to perceptual importance, it becomes possible to reduce solver workload in dense regions while maintaining perceptual realism in areas of high visual significance.
+
+We now close the narrative: PBD gives stable, extensible collision handling; torso/capsule geometry resolves many close-proximity artifacts; velocity-space and GPU-accelerated LPs scale locomotion. Yet a persistent mismatch remains — as local density grows the \emph{constraint cost} grows, but perceptual LODs do not reduce solver work. Few methods explicitly tie perceptual importance to the fidelity of constraint resolution. This observation motivates the present work: \emph{Adaptive Spatial Clustering} inside a PBD pipeline, where clusters modulate constraint fidelity according to perceptual relevance and spatial coherence, promising large solver savings while preserving visible realism.

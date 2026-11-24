@@ -1,0 +1,395 @@
+// ============================================================================
+//  PBDComputeShader.compute
+//  GPU-side Position-Based Dynamics solver — Heatmap Density LOD.
+//
+//  Pipeline (per frame):
+//    1. KernelPredict         – velocity blend + position prediction.
+//                               LOD is NOT assigned here; density unknown yet.
+//    2. KernelClearHashGrid   – zero hash counts and entry slots.
+//    3. KernelHashAgents      – insert every agent; _HashGridCount[bucket]
+//                               becomes the density heatmap (agent count/cell).
+//    4. KernelAssignLOD       – each agent reads its cell's count from the
+//                               heatmap and sets lodLevel from density thresholds.
+//    5. KernelSolveConstraints– Jacobi solve; search radius and contact budget
+//                               are driven by lodLevel. (dispatched N times)
+//    6. KernelApplyCorrections– write averaged Jacobi delta to predictedPosition.
+//    7. KernelFinalize        – commit velocity and position.
+//
+//  LOD tiers (density-driven, reassigned every frame, no frame-offset skips):
+//    0 = HIGH  cell count  > _HighDensityCutoff  → 3×3 neighbourhood, ≤12 contacts
+//    1 = MED   cell count  > _MedDensityCutoff   → centre cell,        ≤4 contacts
+//    2 = LOW   cell count  ≤ _MedDensityCutoff   → centre cell,        ≤1 contact
+//
+//  Key design choices:
+//    • _HashGridCount doubles as the density heatmap — no extra buffer.
+//    • LOD is purely density-based: a dense crowd far away runs HIGH;
+//      a lone near agent runs LOW.  No camera distance, no hysteresis.
+//    • Every agent is solved every frame.
+//    • LRC (long-range anticipatory correction) applies to HIGH-tier only.
+//
+//  Reference: Tomer Weiss et al., "Position-Based Crowd Simulation" (2019).
+// ============================================================================
+
+#pragma kernel KernelPredict
+#pragma kernel KernelClearHashGrid
+#pragma kernel KernelHashAgents
+#pragma kernel KernelAssignLOD
+#pragma kernel KernelSolveConstraints
+#pragma kernel KernelApplyCorrections
+#pragma kernel KernelFinalize
+
+// ---------------------------------------------------------------------------
+//  Constants — must mirror PBDComputeSolver.cs
+// ---------------------------------------------------------------------------
+#define THREAD_GROUP_SIZE   64
+#define HASH_BUCKET_COUNT   8192    // power of 2
+#define HASH_BUCKET_MASK    8191    // HASH_BUCKET_COUNT - 1
+#define MAX_PER_BUCKET      16      // max agents stored per hash bucket
+
+// ---------------------------------------------------------------------------
+//  Structs
+//  AgentGPU must be byte-for-byte identical to the C# AgentGPU struct.
+//  4 × (float3 + float) = 4 × 16 = 64 bytes; all fields 16-byte aligned.
+// ---------------------------------------------------------------------------
+struct AgentGPU
+{
+    float3 position;            // committed world position
+    float  ksi;                 // velocity blend factor  [0, 1]
+    float3 predictedPosition;   // working copy during constraint solve
+    float  radius;
+    float3 velocity;
+    float  mass;
+    float3 preferredVelocity;   // goal velocity from NavMesh (written by CPU)
+    int    lodLevel;            // 0=HIGH  1=MED  2=LOW  (set by KernelAssignLOD)
+};
+
+struct CorrectionData
+{
+    float3 delta;   // accumulated Jacobi correction
+    int    count;   // contacts resolved this dispatch
+};
+
+// ---------------------------------------------------------------------------
+//  Buffers
+// ---------------------------------------------------------------------------
+RWStructuredBuffer<AgentGPU>       _Agents;
+RWStructuredBuffer<CorrectionData> _Corrections;
+RWStructuredBuffer<int>            _HashGrid;       // [HASH_BUCKET_COUNT * MAX_PER_BUCKET]
+RWStructuredBuffer<int>            _HashGridCount;  // [HASH_BUCKET_COUNT] — also density map
+
+// ---------------------------------------------------------------------------
+//  Uniforms (written each frame by PBDComputeSolver.cs)
+// ---------------------------------------------------------------------------
+int   _AgentCount;
+float _DeltaTime;
+float _CellSize;
+
+// Density thresholds (agent count per hash cell)
+int   _HighDensityCutoff;   // agents/cell above this → HIGH  (default 12)
+int   _MedDensityCutoff;    // agents/cell above this → MED   (default  4)
+                            // at or below _MedDensityCutoff  → LOW
+
+// Collision physics parameters
+float _KShortRange;         // short-range constraint stiffness  [0, 1]
+float _KLongRange;          // long-range constraint stiffness   [0, 1]
+float _MuStatic;            // static  friction coefficient
+float _MuKinematic;         // kinetic friction coefficient
+float _AvgCoefficient;      // correction application scale      [0, 1]
+
+// Long-range collision look-ahead in seconds (0 = disabled)
+float _LRCLookAhead;
+
+// ---------------------------------------------------------------------------
+//  Helpers
+// ---------------------------------------------------------------------------
+
+// Spatial hash: maps integer cell coordinates to a bucket index.
+int Hash(int cx, int cz)
+{
+    return ((cx * 73856093) ^ (cz * 19349663)) & HASH_BUCKET_MASK;
+}
+
+// World-space XZ position → integer cell coordinates.
+int2 WorldToCell(float3 p)
+{
+    return int2((int)floor(p.x / _CellSize),
+                (int)floor(p.z / _CellSize));
+}
+
+// ---------------------------------------------------------------------------
+//  Short-range collision correction  (Weiss 2019 §4.2)
+//  Computes normal separation + tangential friction correction for one pair.
+// ---------------------------------------------------------------------------
+float3 ShortRangeCorrection(AgentGPU a, AgentGPU b, inout int count)
+{
+    float3 n = a.predictedPosition - b.predictedPosition;
+    n.y      = 0.0;
+    float d  = length(n);
+    float margin = max(a.radius, 0.25) + max(b.radius, 0.25);
+
+    float f = d - margin;
+    if (f >= 0.0) return float3(0.0, 0.0, 0.0);  // not overlapping
+
+    n = (d > 1e-6) ? (n / d) : float3(1.0, 0.0, 0.0);
+
+    float wA = 1.0 / max(a.mass, 1e-4);
+    float wB = 1.0 / max(b.mass, 1e-4);
+    float w  = wA / (wA + wB);
+
+    float3 dx = -w * _KShortRange * f * n;
+
+    // Tangential friction
+    float3 xi    = a.predictedPosition + dx;
+    float3 xj    = b.predictedPosition - dx;
+    float3 d_rel = (xi - a.position) - (xj - b.position);
+    d_rel.y      = 0.0;
+    float3 d_tan = d_rel - dot(d_rel, n) * n;
+    float  d_len = length(d_tan);
+
+    if (d_len >= _MuStatic * d)
+        d_tan = min(_MuKinematic * d / max(d_len, 1e-6), 1.0) * d_tan;
+
+    count++;
+    return dx + w * d_tan;
+}
+
+// ---------------------------------------------------------------------------
+//  Long-range collision correction  (Weiss 2019 §4.3)
+//  Projects future trajectories, resolves predicted collisions in advance.
+//  Used only by HIGH-tier agents where anticipatory steering is most valuable.
+// ---------------------------------------------------------------------------
+float3 LongRangeCorrection(AgentGPU a, AgentGPU b, inout int count)
+{
+    float r    = max(a.radius, 0.3) + max(b.radius, 0.3);
+    float r_sq = r * r;
+
+    float3 x_ij = a.position - b.position;
+    x_ij.y      = 0.0;
+    float dist  = length(x_ij);
+
+    if (dist < r) r_sq = (r - dist) * (r - dist);
+
+    float3 v_ij = (a.predictedPosition - a.position - (b.predictedPosition - b.position))
+                  / max(_DeltaTime, 1e-6);
+    v_ij.y      = 0.0;
+
+    float aq    = dot(v_ij, v_ij);
+    float bq    = -dot(x_ij, v_ij);
+    float cq    = dot(x_ij, x_ij) - r_sq;
+    float discr = bq * bq - aq * cq;
+
+    if (discr < 0.0 || abs(aq) < 1e-6) return float3(0.0, 0.0, 0.0);
+
+    discr     = sqrt(discr);
+    float t   = (bq - discr) / aq;
+    float t0  = max(_LRCLookAhead, 0.1);
+
+    if (t < 1e-6 || t > t0) return float3(0.0, 0.0, 0.0);
+
+    float t_free = _DeltaTime * floor(t / _DeltaTime);
+    float t_hit  = _DeltaTime + t_free;
+
+    float3 xi_free = a.position + t_free * a.velocity;
+    float3 xi_hit  = a.position + t_hit  * a.velocity;
+    float3 xj_free = b.position + t_free * b.velocity;
+    float3 xj_hit  = b.position + t_hit  * b.velocity;
+
+    float3 n_hit = xi_hit - xj_hit;
+    n_hit.y      = 0.0;
+    float d_hit  = length(n_hit);
+    if (d_hit < 1e-6) return float3(0.0, 0.0, 0.0);
+    n_hit /= d_hit;
+
+    float wA = 1.0 / max(a.mass, 1e-4);
+    float wB = 1.0 / max(b.mass, 1e-4);
+    float w  = wA / (wA + wB);
+    float k  = _KLongRange * (_DeltaTime / max(t, _DeltaTime));
+
+    float3 dx        = -w * (d_hit - r) * n_hit;
+    float3 d_vec     = (xi_hit - xi_free) - (xj_hit - xj_free);
+    d_vec.y          = 0.0;
+    float3 d_tangent = d_vec - dot(d_vec, n_hit) * n_hit;
+    dx              += w * d_tangent;
+
+    count++;
+    return k * dx;
+}
+
+// ===========================================================================
+//  Kernel 1: KernelPredict
+//  Blends velocity toward the goal and integrates position.
+//  LOD is intentionally NOT set here — cell density is not yet available.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelPredict(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)_AgentCount) return;
+
+    AgentGPU a = _Agents[index];
+    a.velocity            = lerp(a.velocity, a.preferredVelocity, a.ksi);
+    a.predictedPosition   = a.position + a.velocity * _DeltaTime;
+    a.predictedPosition.y = a.position.y;  // pin to ground plane
+    _Agents[index] = a;
+}
+
+// ===========================================================================
+//  Kernel 2: KernelClearHashGrid
+//  Resets _HashGridCount (= density map) and entry slots to zero / -1.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelClearHashGrid(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i < (uint)HASH_BUCKET_COUNT)
+        _HashGridCount[i] = 0;
+    if (i < (uint)(HASH_BUCKET_COUNT * MAX_PER_BUCKET))
+        _HashGrid[i] = -1;
+}
+
+// ===========================================================================
+//  Kernel 3: KernelHashAgents
+//  Inserts every agent into the spatial hash atomically.
+//  After this kernel, _HashGridCount[h] = number of agents in bucket h.
+//  This count IS the per-cell density heatmap used by KernelAssignLOD.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelHashAgents(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)_AgentCount) return;
+
+    AgentGPU a = _Agents[index];
+    int2 cell  = WorldToCell(a.predictedPosition);
+    int  h     = Hash(cell.x, cell.y);
+
+    int slot;
+    InterlockedAdd(_HashGridCount[h], 1, slot);
+    if (slot < MAX_PER_BUCKET)
+        _HashGrid[h * MAX_PER_BUCKET + slot] = (int)index;
+}
+
+// ===========================================================================
+//  Kernel 4: KernelAssignLOD
+//  Reads the density heatmap for this agent's cell and assigns lodLevel.
+//
+//  Thresholds (configurable via Inspector):
+//    _HashGridCount[cell] > _HighDensityCutoff  →  HIGH (0)
+//    _HashGridCount[cell] > _MedDensityCutoff   →  MED  (1)
+//    _HashGridCount[cell] ≤ _MedDensityCutoff   →  LOW  (2)
+//
+//  This runs after KernelHashAgents so the counts are fully populated.
+//  No hysteresis — LOD is recalculated from live density every frame.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelAssignLOD(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)_AgentCount) return;
+
+    AgentGPU a = _Agents[index];
+
+    int2 cell    = WorldToCell(a.predictedPosition);
+    int  h       = Hash(cell.x, cell.y);
+    int  density = _HashGridCount[h];   // agent count in this cell
+
+    if      (density > _HighDensityCutoff) a.lodLevel = 0;  // HIGH
+    else if (density > _MedDensityCutoff)  a.lodLevel = 1;  // MED
+    else                                   a.lodLevel = 2;  // LOW
+
+    _Agents[index] = a;
+}
+
+// ===========================================================================
+//  Kernel 5: KernelSolveConstraints
+//  Jacobi constraint solve.  Search radius and contact budget are set by
+//  lodLevel, which was written by KernelAssignLOD this frame.
+//
+//    HIGH (0)  3×3 neighbourhood search,  ≤12 contacts  + LRC
+//    MED  (1)  centre cell only,           ≤4 contacts
+//    LOW  (2)  centre cell only,           ≤1 contact
+//
+//  All agents run every frame — no frame-offset skipping.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelSolveConstraints(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)_AgentCount) return;
+
+    AgentGPU a   = _Agents[index];
+    int      lod = a.lodLevel;
+
+    float3 totalDelta = float3(0.0, 0.0, 0.0);
+    int    count      = 0;
+
+    int2 center     = WorldToCell(a.predictedPosition);
+    int  searchRad  = (lod == 0) ? 1 : 0;
+    int  maxContact = (lod == 0) ? 12 : (lod == 1) ? 4 : 1;
+
+    for (int i = -searchRad; i <= searchRad; i++)
+    {
+        for (int j = -searchRad; j <= searchRad; j++)
+        {
+            if (count >= maxContact) break;
+
+            int h         = Hash(center.x + i, center.y + j);
+            int cellCount = min(_HashGridCount[h], MAX_PER_BUCKET);
+
+            for (int s = 0; s < cellCount; s++)
+            {
+                if (count >= maxContact) break;
+
+                int nb = _HashGrid[h * MAX_PER_BUCKET + s];
+                if (nb < 0 || nb == (int)index) continue;
+
+                AgentGPU b = _Agents[nb];
+
+                totalDelta += ShortRangeCorrection(a, b, count);
+
+                if (lod == 0 && _LRCLookAhead > 0.0)
+                    totalDelta += LongRangeCorrection(a, b, count);
+            }
+        }
+    }
+
+    CorrectionData cd;
+    cd.delta = totalDelta;
+    cd.count = count;
+    _Corrections[index] = cd;
+}
+
+// ===========================================================================
+//  Kernel 6: KernelApplyCorrections
+//  Applies the averaged Jacobi delta to predictedPosition.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelApplyCorrections(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)_AgentCount) return;
+
+    CorrectionData cd = _Corrections[index];
+    if (cd.count <= 0) return;
+
+    AgentGPU a = _Agents[index];
+    a.predictedPosition  += _AvgCoefficient * cd.delta / max((float)cd.count, 1.0);
+    a.predictedPosition.y = a.position.y;  // re-clamp to ground
+    _Agents[index] = a;
+}
+
+// ===========================================================================
+//  Kernel 7: KernelFinalize
+//  Derives velocity from position delta, commits predictedPosition to position.
+// ===========================================================================
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void KernelFinalize(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)_AgentCount) return;
+
+    AgentGPU a = _Agents[index];
+    a.velocity = (a.predictedPosition - a.position) / max(_DeltaTime, 1e-5);
+    a.position = a.predictedPosition;
+    _Agents[index] = a;
+}
