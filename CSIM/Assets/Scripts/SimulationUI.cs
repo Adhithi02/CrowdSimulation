@@ -66,8 +66,19 @@ public class SimulationUI : MonoBehaviour
     void Update()
     {
         if (_mgr == null) return;
-        _statusLbl.text =
-            $"Solver: {_mgr.activeSolver}   Agents: {_mgr.LiveAgentCount}";
+        if (_mgr.activeSolver == SolverMode.PBDCLODJobs ||
+            _mgr.activeSolver == SolverMode.PBDCompute ||
+            _mgr.activeSolver == SolverMode.PBDCLODCullingJobs)
+        {
+            _mgr.GetFidelityCounts(out int high, out int med, out int low);
+            _statusLbl.text =
+                $"Solver: {_mgr.activeSolver}   Agents: {_mgr.LiveAgentCount} (H:{high} M:{med} L:{low})";
+        }
+        else
+        {
+            _statusLbl.text =
+                $"Solver: {_mgr.activeSolver}   Agents: {_mgr.LiveAgentCount}";
+        }
 
         SetLbl(_agentLbl,   "Agent Count: ",  (int)_agentSld.value);
         SetLbl(_speedLbl,   "Speed: ",         _speedSld.value,  "F2");

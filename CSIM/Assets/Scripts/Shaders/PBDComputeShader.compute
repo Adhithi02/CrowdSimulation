@@ -61,6 +61,9 @@ struct AgentGPU
     float  mass;
     float3 preferredVelocity;   // goal velocity from NavMesh (written by CPU)
     int    lodLevel;            // 0=HIGH  1=MED  2=LOW  (set by KernelAssignLOD)
+    float  importanceScore;     // [0, 1] importance score (set by KernelAssignLOD)
+    int    lastContactCount;    // contacts from previous frame (interaction metric)
+    float2 _padding;            // 16-byte alignment (80 bytes total)
 };
 
 struct CorrectionData
@@ -88,6 +91,22 @@ float _CellSize;
 int   _HighDensityCutoff;   // agents/cell above this → HIGH  (default 12)
 int   _MedDensityCutoff;    // agents/cell above this → MED   (default  4)
                             // at or below _MedDensityCutoff  → LOW
+
+// Importance-driven dynamic fidelity parameters
+float3 _FocusPoint;
+float4 _FrustumPlanes[6];
+int    _HasFrustumPlanes;
+float  _WeightDistance;
+float  _WeightVisibility;
+float  _WeightInteraction;
+float  _WeightDensity;
+float  _HighImportanceThresh;
+float  _MedImportanceThresh;
+float  _MaxImportanceDist;
+int    _MaxInteractionContacts;
+int    _CurrentIteration;
+int    _IterationCount;
+int    _SolveLowThisFrame;
 
 // Collision physics parameters
 float _KShortRange;         // short-range constraint stiffness  [0, 1]
@@ -271,15 +290,15 @@ void KernelHashAgents(uint3 id : SV_DispatchThreadID)
 
 // ===========================================================================
 //  Kernel 4: KernelAssignLOD
-//  Reads the density heatmap for this agent's cell and assigns lodLevel.
-//
-//  Thresholds (configurable via Inspector):
-//    _HashGridCount[cell] > _HighDensityCutoff  →  HIGH (0)
-//    _HashGridCount[cell] > _MedDensityCutoff   →  MED  (1)
-//    _HashGridCount[cell] ≤ _MedDensityCutoff   →  LOW  (2)
-//
-//  This runs after KernelHashAgents so the counts are fully populated.
-//  No hysteresis — LOD is recalculated from live density every frame.
+//  Computes normalized importance score [0, 1] from:
+//    1. Distance    (proximity to _FocusPoint)
+//    2. Visibility  (camera frustum planes)
+//    3. Interaction (lastContactCount from previous frame)
+//    4. Density     (_HashGridCount[cell])
+//  Assigns fidelity tier:
+//    importance >= _HighImportanceThresh  → HIGH (0)
+//    importance >= _MedImportanceThresh   → MED  (1)
+//    otherwise                            → LOW  (2)
 // ===========================================================================
 [numthreads(THREAD_GROUP_SIZE, 1, 1)]
 void KernelAssignLOD(uint3 id : SV_DispatchThreadID)
@@ -289,13 +308,44 @@ void KernelAssignLOD(uint3 id : SV_DispatchThreadID)
 
     AgentGPU a = _Agents[index];
 
+    // 1. Distance score
+    float dist = distance(a.position, _FocusPoint);
+    float distScore = saturate(1.0 - dist / max(_MaxImportanceDist, 1.0));
+
+    // 2. Visibility score (6-plane frustum test)
+    float visScore = 1.0;
+    if (_HasFrustumPlanes == 1)
+    {
+        for (int p = 0; p < 6; p++)
+        {
+            if (dot(_FrustumPlanes[p].xyz, a.position) + _FrustumPlanes[p].w < 0.0)
+            {
+                visScore = 0.0;
+                break;
+            }
+        }
+    }
+
+    // 3. Interaction score
+    float interScore = saturate((float)a.lastContactCount / max((float)_MaxInteractionContacts, 1.0));
+
+    // 4. Local crowd density score
     int2 cell    = WorldToCell(a.predictedPosition);
     int  h       = Hash(cell.x, cell.y);
-    int  density = _HashGridCount[h];   // agent count in this cell
+    int  density = _HashGridCount[h];
+    float densityScore = saturate((float)density / max((float)_HighDensityCutoff, 1.0));
 
-    if      (density > _HighDensityCutoff) a.lodLevel = 0;  // HIGH
-    else if (density > _MedDensityCutoff)  a.lodLevel = 1;  // MED
-    else                                   a.lodLevel = 2;  // LOW
+    float totalWeight = max(_WeightDistance + _WeightVisibility + _WeightInteraction + _WeightDensity, 1e-5);
+    float importance = saturate(
+        (_WeightDistance * distScore +
+         _WeightVisibility * visScore +
+         _WeightInteraction * interScore +
+         _WeightDensity * densityScore) / totalWeight);
+
+    a.importanceScore = importance;
+    if      (importance >= _HighImportanceThresh) a.lodLevel = 0;  // HIGH
+    else if (importance >= _MedImportanceThresh)  a.lodLevel = 1;  // MED
+    else                                          a.lodLevel = 2;  // LOW
 
     _Agents[index] = a;
 }
@@ -319,6 +369,14 @@ void KernelSolveConstraints(uint3 id : SV_DispatchThreadID)
 
     AgentGPU a   = _Agents[index];
     int      lod = a.lodLevel;
+
+    // Computational effort allocation:
+    //   HIGH (0): all iterations
+    //   MED  (1): half iteration budget
+    //   LOW  (2): first iteration only on active LOW frames
+    int medCap = max(1, (_IterationCount + 1) / 2);
+    if (lod == 1 && _CurrentIteration >= medCap) return;
+    if (lod == 2 && (_CurrentIteration > 0 || _SolveLowThisFrame == 0)) return;
 
     float3 totalDelta = float3(0.0, 0.0, 0.0);
     int    count      = 0;
@@ -369,10 +427,15 @@ void KernelApplyCorrections(uint3 id : SV_DispatchThreadID)
     uint index = id.x;
     if (index >= (uint)_AgentCount) return;
 
+    AgentGPU a = _Agents[index];
+    int lod = a.lodLevel;
+    int medCap = max(1, (_IterationCount + 1) / 2);
+    if (lod == 1 && _CurrentIteration >= medCap) return;
+    if (lod == 2 && (_CurrentIteration > 0 || _SolveLowThisFrame == 0)) return;
+
     CorrectionData cd = _Corrections[index];
     if (cd.count <= 0) return;
 
-    AgentGPU a = _Agents[index];
     a.predictedPosition  += _AvgCoefficient * cd.delta / max((float)cd.count, 1.0);
     a.predictedPosition.y = a.position.y;  // re-clamp to ground
     _Agents[index] = a;
@@ -391,5 +454,6 @@ void KernelFinalize(uint3 id : SV_DispatchThreadID)
     AgentGPU a = _Agents[index];
     a.velocity = (a.predictedPosition - a.position) / max(_DeltaTime, 1e-5);
     a.position = a.predictedPosition;
+    a.lastContactCount = _Corrections[index].count;
     _Agents[index] = a;
 }

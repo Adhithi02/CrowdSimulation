@@ -72,10 +72,21 @@ public class PBDComputeSolver : MonoBehaviour
     private const int THREAD_GROUP_SIZE  = 64;
 
     // Stride sizes must match HLSL struct layouts exactly.
-    // AgentGPU:      4 × (float3 + float) = 64 bytes
-    // CorrectionData: float3 + int        = 16 bytes
-    private const int AGENT_STRIDE      = 64;
+    // AgentGPU:      5 × 16 = 80 bytes
+    // CorrectionData: float3 + int = 16 bytes
+    private const int AGENT_STRIDE      = 80;
     private const int CORRECTION_STRIDE = 16;
+
+    [Header("Importance Scoring (Synced by SimulationManager)")]
+    public Camera activeCamera;
+    public float weightDistance = 0.30f;
+    public float weightVisibility = 0.25f;
+    public float weightInteraction = 0.20f;
+    public float weightDensity = 0.25f;
+    public float highImportanceThreshold = 0.60f;
+    public float medImportanceThreshold = 0.30f;
+    public float maxImportanceDistance = 60f;
+    public int maxInteractionContacts = 6;
 
     // ── GPU-side struct mirroring HLSL AgentGPU ───────────────────────────────
 
@@ -89,7 +100,10 @@ public class PBDComputeSolver : MonoBehaviour
         public Vector3 velocity;
         public float   mass;
         public Vector3 preferredVelocity;
-        public int     lodLevel;   // 0=HIGH  1=MED  2=LOW
+        public int     lodLevel;          // 0=HIGH  1=MED  2=LOW
+        public float   importanceScore;   // [0, 1]
+        public int     lastContactCount;
+        public Vector2 _padding;
     }
 
     // ── Kernel IDs ────────────────────────────────────────────────────────────
@@ -109,6 +123,7 @@ public class PBDComputeSolver : MonoBehaviour
     private AgentGPU[]      _agentUpload;   // written each frame, sent to GPU
     private AgentGPU[]      _agentReadback; // received from AsyncGPUReadback
     private List<AgentBase> _agents;
+    private readonly Vector4[] _frustumPlaneVectors = new Vector4[6];
 
     // ── Async readback guard ──────────────────────────────────────────────────
 
@@ -177,7 +192,7 @@ public class PBDComputeSolver : MonoBehaviour
         _agentsBuffer.SetData(_agentUpload);
 
         // 2 ── Per-frame uniforms ──────────────────────────────────────────────
-        SetUniforms(n, dt);
+        SetUniforms(n, dt, iterations, focusPoint);
 
         // 3 ── Predict (velocity blend + position integration) ────────────────
         computeShader.Dispatch(_kPredict, _agentGroups, 1, 1);
@@ -191,9 +206,9 @@ public class PBDComputeSolver : MonoBehaviour
 
         // 5 ── Constraint iterations (Solve → Apply) ──────────────────────────
         //  The hash grid is already built; we reuse it every iteration.
-        //  All agents run every frame — no frame-offset skipping.
         for (int iter = 0; iter < iterations; iter++)
         {
+            computeShader.SetInt("_CurrentIteration", iter);
             computeShader.Dispatch(_kSolve, _agentGroups, 1, 1);
             computeShader.Dispatch(_kApply, _agentGroups, 1, 1);
         }
@@ -231,8 +246,10 @@ public class PBDComputeSolver : MonoBehaviour
                     vPref = dir.normalized * pbd.prefSpeed;
             }
 
-            // lodLevel is written by KernelAssignLOD on the GPU each frame;
-            // we don't need to preserve or upload it — set to 0 as a neutral seed.
+            int prevContacts = (_agentReadback != null && i < _agentReadback.Length)
+                ? _agentReadback[i].lastContactCount
+                : 0;
+
             _agentUpload[i] = new AgentGPU
             {
                 position          = pbd.transform.position,
@@ -242,12 +259,14 @@ public class PBDComputeSolver : MonoBehaviour
                 ksi               = pbd.ksi,
                 radius            = pbd.radius,
                 mass              = pbd.mass,
-                lodLevel          = 0
+                lodLevel          = pbd.fidelityLevel,
+                importanceScore   = pbd.importanceScore,
+                lastContactCount  = prevContacts
             };
         }
     }
 
-    private void SetUniforms(int agentCount, float dt)
+    private void SetUniforms(int agentCount, float dt, int iterations, Vector3 focusPoint)
     {
         computeShader.SetInt  ("_AgentCount",         agentCount);
         computeShader.SetFloat("_DeltaTime",          dt);
@@ -256,6 +275,33 @@ public class PBDComputeSolver : MonoBehaviour
         // Density LOD thresholds
         computeShader.SetInt  ("_HighDensityCutoff",  highDensityCutoff);
         computeShader.SetInt  ("_MedDensityCutoff",   medDensityCutoff);
+
+        // Importance-driven dynamic fidelity uniforms
+        computeShader.SetVector("_FocusPoint",            focusPoint);
+        computeShader.SetFloat ("_WeightDistance",        weightDistance);
+        computeShader.SetFloat ("_WeightVisibility",      weightVisibility);
+        computeShader.SetFloat ("_WeightInteraction",     weightInteraction);
+        computeShader.SetFloat ("_WeightDensity",         weightDensity);
+        computeShader.SetFloat ("_HighImportanceThresh",  highImportanceThreshold);
+        computeShader.SetFloat ("_MedImportanceThresh",   medImportanceThreshold);
+        computeShader.SetFloat ("_MaxImportanceDist",     Mathf.Max(maxImportanceDistance, 1f));
+        computeShader.SetInt   ("_MaxInteractionContacts", Mathf.Max(maxInteractionContacts, 1));
+        computeShader.SetInt   ("_IterationCount",        Mathf.Max(iterations, 1));
+        computeShader.SetInt   ("_SolveLowThisFrame",     (Time.frameCount % 4 == 0) ? 1 : 0);
+
+        Camera cam = activeCamera != null ? activeCamera : Camera.main;
+        if (cam != null)
+        {
+            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+            for (int p = 0; p < 6; p++)
+                _frustumPlaneVectors[p] = new Vector4(planes[p].normal.x, planes[p].normal.y, planes[p].normal.z, planes[p].distance);
+            computeShader.SetInt("_HasFrustumPlanes", 1);
+            computeShader.SetVectorArray("_FrustumPlanes", _frustumPlaneVectors);
+        }
+        else
+        {
+            computeShader.SetInt("_HasFrustumPlanes", 0);
+        }
 
         // Collision parameters
         computeShader.SetFloat("_KShortRange",        kShortRange);
@@ -283,6 +329,8 @@ public class PBDComputeSolver : MonoBehaviour
 
             pbd.velocity          = g.velocity;
             pbd.predictedPosition = g.predictedPosition;
+            pbd.importanceScore   = g.importanceScore;
+            pbd.fidelityLevel     = g.lodLevel;
 
             pbd.transform.position = g.position;
             if (g.velocity.sqrMagnitude > 0.01f)
@@ -293,7 +341,7 @@ public class PBDComputeSolver : MonoBehaviour
                     Time.fixedDeltaTime * 10f);
             }
 
-            if (pbd._agent != null)
+            if (pbd._agent != null && g.lodLevel < 2)
                 pbd._agent.nextPosition = g.position;
         }
 

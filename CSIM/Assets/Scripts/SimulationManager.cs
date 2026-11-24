@@ -106,6 +106,30 @@ public class SimulationManager : MonoBehaviour
     public float clodMedDist = 50f;
 
     // -----------------------------------------------------------------------
+    // Inspector — Importance-Driven Dynamic Fidelity
+    // -----------------------------------------------------------------------
+
+    [Header("Importance Scoring Weights")]
+    [Range(0f, 1f)] public float weightDistance = 0.30f;
+    [Range(0f, 1f)] public float weightVisibility = 0.25f;
+    [Range(0f, 1f)] public float weightInteraction = 0.20f;
+    [Range(0f, 1f)] public float weightDensity = 0.25f;
+
+    [Header("Importance Fidelity Thresholds")]
+    [Tooltip("Importance >= this assigns HIGH fidelity (0).")]
+    [Range(0f, 1f)] public float highImportanceThreshold = 0.60f;
+    [Tooltip("Importance >= this (and < high) assigns MED fidelity (1); below assigns LOW (2).")]
+    [Range(0f, 1f)] public float medImportanceThreshold = 0.30f;
+    [Tooltip("Hysteresis band around importance thresholds to prevent tier flickering.")]
+    [Range(0f, 0.2f)] public float importanceHysteresis = 0.05f;
+    [Tooltip("Distance at which distance-importance decays to 0.")]
+    public float maxImportanceDistance = 60f;
+    [Tooltip("Interaction contact count that saturates interaction-importance to 1.")]
+    public int maxInteractionContacts = 6;
+    [Tooltip("Local cell density that saturates density-importance to 1.")]
+    public int maxImportanceDensity = 12;
+
+    // -----------------------------------------------------------------------
     // Inspector — Debug
     // -----------------------------------------------------------------------
 
@@ -859,6 +883,7 @@ public class SimulationManager : MonoBehaviour
                 _clodSolver?.Solve(agents, dt, pbdIterations, focus);
                 break;
             case SolverMode.PBDCompute:
+                UpdateComputeImportanceParams();
                 _computeSolver?.Solve(agents, dt, pbdIterations, focus);
                 break;
             case SolverMode.PBDCLODCullingJobs:
@@ -951,17 +976,28 @@ public class SimulationManager : MonoBehaviour
 
     void UpdateCLODDistances()
     {
+        var cam = benchmarkCamera != null ? benchmarkCamera : Camera.main;
+
         if (_clodSolver != null)
         {
             _clodSolver.highLodDistance = clodHighDist;
             _clodSolver.medLodDistance  = clodMedDist;
+            _clodSolver.weightDistance = weightDistance;
+            _clodSolver.weightVisibility = weightVisibility;
+            _clodSolver.weightInteraction = weightInteraction;
+            _clodSolver.weightDensity = weightDensity;
+            _clodSolver.highImportanceThreshold = highImportanceThreshold;
+            _clodSolver.medImportanceThreshold = medImportanceThreshold;
+            _clodSolver.importanceHysteresis = importanceHysteresis;
+            _clodSolver.maxImportanceDistance = maxImportanceDistance;
+            _clodSolver.maxInteractionContacts = maxInteractionContacts;
+            _clodSolver.maxImportanceDensity = maxImportanceDensity;
 
-            // Push camera data for frustum-aware LOD
-            var cam = Camera.main;
             if (cam != null)
             {
                 _clodSolver.cameraPosition = cam.transform.position;
                 _clodSolver.cameraForward  = cam.transform.forward;
+                _clodSolver.activeCamera   = cam;
             }
         }
 
@@ -969,8 +1005,36 @@ public class SimulationManager : MonoBehaviour
         {
             _cullingSolver.highLodDistance = clodHighDist;
             _cullingSolver.medLodDistance  = clodMedDist;
-            // protagonistCamera is set via Inspector on CLODPBDCullingSolver directly
+            _cullingSolver.weightDistance = weightDistance;
+            _cullingSolver.weightVisibility = weightVisibility;
+            _cullingSolver.weightInteraction = weightInteraction;
+            _cullingSolver.weightDensity = weightDensity;
+            _cullingSolver.highImportanceThreshold = highImportanceThreshold;
+            _cullingSolver.medImportanceThreshold = medImportanceThreshold;
+            _cullingSolver.importanceHysteresis = importanceHysteresis;
+            _cullingSolver.maxImportanceDistance = maxImportanceDistance;
+            _cullingSolver.maxInteractionContacts = maxInteractionContacts;
+            _cullingSolver.maxImportanceDensity = maxImportanceDensity;
+            if (_cullingSolver.protagonistCamera == null && cam != null)
+                _cullingSolver.protagonistCamera = cam;
         }
+    }
+
+    void UpdateComputeImportanceParams()
+    {
+        if (_computeSolver == null) return;
+        var cam = benchmarkCamera != null ? benchmarkCamera : Camera.main;
+        _computeSolver.weightDistance = weightDistance;
+        _computeSolver.weightVisibility = weightVisibility;
+        _computeSolver.weightInteraction = weightInteraction;
+        _computeSolver.weightDensity = weightDensity;
+        _computeSolver.highImportanceThreshold = highImportanceThreshold;
+        _computeSolver.medImportanceThreshold = medImportanceThreshold;
+        _computeSolver.maxImportanceDistance = maxImportanceDistance;
+        _computeSolver.maxInteractionContacts = maxInteractionContacts;
+        _computeSolver.highDensityCutoff = maxImportanceDensity;
+        if (cam != null)
+            _computeSolver.activeCamera = cam;
     }
 
     // -----------------------------------------------------------------------
@@ -1150,6 +1214,18 @@ public class SimulationManager : MonoBehaviour
 
     public int LiveAgentCount => agents.Count;
     public float CurrentFPS => 1f / Mathf.Max(Time.unscaledDeltaTime, 1e-4f);
+
+    public void GetFidelityCounts(out int high, out int med, out int low)
+    {
+        high = med = low = 0;
+        for (int i = 0; i < agents.Count; i++)
+        {
+            int tier = agents[i].fidelityLevel;
+            if (tier == 0) high++;
+            else if (tier == 1) med++;
+            else low++;
+        }
+    }
 
     public void SetSolverMode(SolverMode mode)
     {

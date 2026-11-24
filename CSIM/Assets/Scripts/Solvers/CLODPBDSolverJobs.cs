@@ -19,7 +19,8 @@ public struct CLODAgentData
     public float  ksi;
     public float  radius;
     public float  mass;
-    public int    lastLodLevel;  // 0=HIGH  1=MED  2=LOW  — kept across frames
+    public float  importanceScore; // [0, 1] computed from distance, visibility, interaction, density
+    public int    lastLodLevel;    // 0=HIGH  1=MED  2=LOW  — kept across frames
 }
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ public class CLODPBDSolverJobs : MonoBehaviour
     private NativeArray<CLODAgentData>              _agentDataArray;
     private NativeArray<float3>                     _corrections;
     private NativeArray<int>                        _correctionCounts;
+    private NativeArray<float4>                     _frustumPlanes;
     private TransformAccessArray                    _transformArray;
     private NativeParallelMultiHashMap<int, int>    _spatialHashMap;
 
@@ -53,18 +55,26 @@ public class CLODPBDSolverJobs : MonoBehaviour
     public float highLodDistance = 20f;
     public float medLodDistance  = 50f;
 
-    // Camera data for frustum-aware LOD (set by SimulationManager each frame)
+    // Camera data for frustum-aware importance (set by SimulationManager each frame)
+    public Camera activeCamera;
     public float3 cameraPosition = new float3(0, 10, 0);
     public float3 cameraForward  = new float3(0, -1, 0); // default: top-down
 
-    // Adaptive LOD: scale distances down when FPS drops below target
+    // Importance scoring weights & thresholds (synced by SimulationManager)
+    public float weightDistance          = 0.30f;
+    public float weightVisibility        = 0.25f;
+    public float weightInteraction       = 0.20f;
+    public float weightDensity           = 0.25f;
+    public float highImportanceThreshold = 0.60f;
+    public float medImportanceThreshold  = 0.30f;
+    public float importanceHysteresis    = 0.05f;
+    public float maxImportanceDistance   = 60f;
+    public int   maxInteractionContacts  = 6;
+    public int   maxImportanceDensity    = 12;
+
+    // Adaptive LOD: scale importance thresholds when FPS drops below target
     public bool  adaptiveLOD = true;
     public float targetFPS   = 60f;
-
-    // 10 % hysteresis band — prevents agents flickering at tier boundaries
-    private const float HYSTERESIS       = 0.10f;
-    // Corrections/frame needed to promote an agent one tier (density promotion)
-    private const int   DENSITY_THRESHOLD = 5;
 
     // -----------------------------------------------------------------------
     // Init / Dispose
@@ -78,6 +88,7 @@ public class CLODPBDSolverJobs : MonoBehaviour
         _agentDataArray  = new NativeArray<CLODAgentData>(count, Allocator.Persistent);
         _corrections     = new NativeArray<float3>(count,        Allocator.Persistent);
         _correctionCounts= new NativeArray<int>(count,           Allocator.Persistent);
+        _frustumPlanes   = new NativeArray<float4>(6,            Allocator.Persistent);
 
         // 2× over-provision to keep fill-factor ≤ 50 % and reduce hash collisions.
         // All three tiers are hashed now, so worst case is count entries total.
@@ -94,6 +105,16 @@ public class CLODPBDSolverJobs : MonoBehaviour
         _initialized = true;
     }
 
+    private bool RefreshFrustumPlanes()
+    {
+        Camera cam = activeCamera != null ? activeCamera : Camera.main;
+        if (cam == null) return false;
+        Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+        for (int p = 0; p < 6; p++)
+            _frustumPlanes[p] = new float4(planes[p].normal.x, planes[p].normal.y, planes[p].normal.z, planes[p].distance);
+        return true;
+    }
+
     // -----------------------------------------------------------------------
     // Main solve — called by SimulationManager.FixedUpdate
     // -----------------------------------------------------------------------
@@ -103,6 +124,8 @@ public class CLODPBDSolverJobs : MonoBehaviour
         int count = agents.Count;
         if (count == 0 || dt <= 0f) return;
         if (!_initialized || _agentDataArray.Length != count) Init(agents);
+
+        bool hasFrustum = RefreshFrustumPlanes();
 
         // ── 1. Populate NativeArray from main thread ────────────────────────
         for (int i = 0; i < count; i++)
@@ -114,8 +137,9 @@ public class CLODPBDSolverJobs : MonoBehaviour
                     (float3)pbd._agent.steeringTarget - (float3)pbd.transform.position)
                     * pbd.prefSpeed;
 
-            // Preserve lastLodLevel from the previous frame for hysteresis.
+            // Preserve lastLodLevel & importanceScore from the previous frame for hysteresis.
             int prevLod = _agentDataArray[i].lastLodLevel;
+            float prevImp = _agentDataArray[i].importanceScore;
 
             _agentDataArray[i] = new CLODAgentData
             {
@@ -126,75 +150,65 @@ public class CLODPBDSolverJobs : MonoBehaviour
                 ksi               = pbd.ksi,
                 radius            = pbd.radius,
                 mass              = pbd.mass,
+                importanceScore   = prevImp,
                 lastLodLevel      = prevLod
             };
         }
 
-        // ── 2. Categorise agents into LOD tiers ─────────────────────────────
-        // Adaptive: when FPS drops, shrink thresholds so more agents go to lower tiers.
-        float fps   = 1f / math.max(Time.unscaledDeltaTime, 1e-4f);
-        float scale = adaptiveLOD ? math.clamp(fps / targetFPS, 0.4f, 1.0f) : 1.0f;
-        float adaptedHigh = highLodDistance * scale;
-        float adaptedMed  = medLodDistance  * scale;
+        // ── 2. Predict step — all agents ────────────────────────────────────
+        JobHandle handle = new CLODPredictJob { Agents = _agentDataArray, dt = dt }
+            .Schedule(count, 64);
 
-        JobHandle handle = new CategorizeLODJob
+        // ── 3. Build spatial hashmap ONCE per frame before scoring ──────────
+        // All agents are hashed so CategorizeLODJob can read live local crowd density.
+        handle = new CLODClearHashMapJob { HashMap = _spatialHashMap }.Schedule(handle);
+        handle = new CLODHashAllPositionsJob
         {
-            Agents               = _agentDataArray,
-            FocusPoint           = focusPoint,
-            HighLodDistSq        = adaptedHigh * adaptedHigh,
-            MedLodDistSq         = adaptedMed  * adaptedMed,
-            Hysteresis           = HYSTERESIS,
-            CameraPos            = cameraPosition,
-            CameraForward        = math.normalizesafe(cameraForward),
-            PrevCorrectionCounts = _correctionCounts,   // values from last frame
-            DensityThreshold     = DENSITY_THRESHOLD,
-            HighIndices          = _highIndices,
-            MedIndices           = _medIndices,
-            LowIndices           = _lowIndices
-        }.Schedule();
+            Agents   = _agentDataArray,
+            HashMap  = _spatialHashMap.AsParallelWriter(),
+            CellSize = gridCellSize
+        }.Schedule(count, 64, handle);
 
-        // ── 3. Predict step — all agents ────────────────────────────────────
-        handle = new CLODPredictJob { Agents = _agentDataArray, dt = dt }
-            .Schedule(count, 64, handle);
+        // ── 4. Compute importance score & assign fidelity tiers ─────────────
+        // Adaptive: when FPS drops, raise thresholds slightly so more agents move to MED/LOW.
+        float fps   = 1f / math.max(Time.unscaledDeltaTime, 1e-4f);
+        float scale = adaptiveLOD ? math.clamp(targetFPS / math.max(fps, 1f), 1.0f, 1.35f) : 1.0f;
+        float adaptedHigh = math.min(0.95f, highImportanceThreshold * scale);
+        float adaptedMed  = math.min(adaptedHigh - 0.05f, medImportanceThreshold * scale);
+
+        handle = new CategorizeLODJob
+        {
+            Agents                 = _agentDataArray,
+            FocusPoint             = focusPoint,
+            CameraPos              = cameraPosition,
+            CameraForward          = math.normalizesafe(cameraForward),
+            HasFrustumPlanes       = hasFrustum ? 1 : 0,
+            FrustumPlanes          = _frustumPlanes,
+            HashMap                = _spatialHashMap,
+            CellSize               = gridCellSize,
+            PrevCorrectionCounts   = _correctionCounts,
+            WeightDistance         = weightDistance,
+            WeightVisibility       = weightVisibility,
+            WeightInteraction      = weightInteraction,
+            WeightDensity          = weightDensity,
+            HighImportanceThresh   = adaptedHigh,
+            MedImportanceThresh    = adaptedMed,
+            Hysteresis             = importanceHysteresis,
+            MaxImportanceDist      = math.max(maxImportanceDistance, 1f),
+            MaxInteractionContacts = math.max(maxInteractionContacts, 1),
+            MaxImportanceDensity   = math.max(maxImportanceDensity, 1),
+            HighIndices            = _highIndices,
+            MedIndices             = _medIndices,
+            LowIndices             = _lowIndices
+        }.Schedule(handle);
 
         // LOW LOD resolves every 4th frame (cheap, minimal visual impact far away)
         bool resolveLowThisFrame = Time.frameCount % 4 == 0;
+        int medIterationCap = math.max(1, (iterations + 1) / 2);
 
-        // ── 4. Build spatial hashmap ONCE per frame (not per iteration) ──────
-        // Predicted positions change only slightly between iterations, so
-        // rebuilding once gives ~same quality at 1/iterations the hashing cost.
-        handle = new CLODClearHashMapJob { HashMap = _spatialHashMap }.Schedule(handle);
-
-        handle = new CLODHashPositionsJob
-        {
-            Indices  = _highIndices.AsDeferredJobArray(),
-            Agents   = _agentDataArray,
-            HashMap  = _spatialHashMap.AsParallelWriter(),
-            CellSize = gridCellSize
-        }.Schedule(_highIndices, 64, handle);
-
-        handle = new CLODHashPositionsJob
-        {
-            Indices  = _medIndices.AsDeferredJobArray(),
-            Agents   = _agentDataArray,
-            HashMap  = _spatialHashMap.AsParallelWriter(),
-            CellSize = gridCellSize
-        }.Schedule(_medIndices, 64, handle);
-
-        handle = new CLODHashPositionsJob
-        {
-            Indices  = _lowIndices.AsDeferredJobArray(),
-            Agents   = _agentDataArray,
-            HashMap  = _spatialHashMap.AsParallelWriter(),
-            CellSize = gridCellSize
-        }.Schedule(_lowIndices, 64, handle);
-
-        // ── 5. Constraint iterations ─────────────────────────────────────────
+        // ── 5. Constraint iterations (allocated by fidelity tier) ───────────
         for (int iter = 0; iter < iterations; iter++)
         {
-
-            // ── Constraint solve ────────────────────────────────────────────
-
             // HIGH: 3×3 grid, ≤12 neighbours, every iteration
             handle = new HighDetailConstraintJob
             {
@@ -206,16 +220,19 @@ public class CLODPBDSolverJobs : MonoBehaviour
                 CellSize           = gridCellSize
             }.Schedule(_highIndices, 64, handle);
 
-            // MED: centre cell, ≤4 neighbours, every iteration (no time-slicing)
-            handle = new MedDetailConstraintJob
+            // MED: centre cell, ≤4 neighbours, half-budget iterations
+            if (iter < medIterationCap)
             {
-                Indices            = _medIndices.AsDeferredJobArray(),
-                AgentsIn           = _agentDataArray,
-                HashMap            = _spatialHashMap,
-                PositionCorrections= _corrections,
-                CorrectionCounts   = _correctionCounts,
-                CellSize           = gridCellSize
-            }.Schedule(_medIndices, 64, handle);
+                handle = new MedDetailConstraintJob
+                {
+                    Indices            = _medIndices.AsDeferredJobArray(),
+                    AgentsIn           = _agentDataArray,
+                    HashMap            = _spatialHashMap,
+                    PositionCorrections= _corrections,
+                    CorrectionCounts   = _correctionCounts,
+                    CellSize           = gridCellSize
+                }.Schedule(_medIndices, 64, handle);
+            }
 
             // LOW: centre cell, ≤1 neighbour, first iteration only, every 4th frame
             if (iter == 0 && resolveLowThisFrame)
@@ -241,13 +258,16 @@ public class CLODPBDSolverJobs : MonoBehaviour
                 CorrectionCounts    = _correctionCounts
             }.Schedule(_highIndices, 64, handle);
 
-            handle = new CLODApplyConstraintsJob
+            if (iter < medIterationCap)
             {
-                Indices             = _medIndices.AsDeferredJobArray(),
-                Agents              = _agentDataArray,
-                PositionCorrections = _corrections,
-                CorrectionCounts    = _correctionCounts
-            }.Schedule(_medIndices, 64, handle);
+                handle = new CLODApplyConstraintsJob
+                {
+                    Indices             = _medIndices.AsDeferredJobArray(),
+                    Agents              = _agentDataArray,
+                    PositionCorrections = _corrections,
+                    CorrectionCounts    = _correctionCounts
+                }.Schedule(_medIndices, 64, handle);
+            }
 
             if (iter == 0 && resolveLowThisFrame)
             {
@@ -266,8 +286,8 @@ public class CLODPBDSolverJobs : MonoBehaviour
         handle = new CLODApplyTransformJob { Agents = _agentDataArray, dt = dt }.Schedule(_transformArray, handle);
         handle.Complete();
 
-        // ── 7. Sync back to main thread (NavMesh, C# velocity cache) ────────
-        // Skip NavMesh nextPosition for LOW LOD agents — they're far from camera,
+        // ── 7. Sync back to main thread (NavMesh, C# velocity & importance) ─
+        // Skip NavMesh nextPosition for LOW LOD agents — they're less relevant,
         // a frame-stale navmesh position is imperceptible and saves N writes/frame.
         for (int i = 0; i < count; i++)
         {
@@ -275,6 +295,8 @@ public class CLODPBDSolverJobs : MonoBehaviour
             var data = _agentDataArray[i];
             pbd.velocity          = data.velocity;
             pbd.predictedPosition = data.predictedPosition;
+            pbd.importanceScore   = data.importanceScore;
+            pbd.fidelityLevel     = data.lastLodLevel;
             if (pbd._agent != null && data.lastLodLevel < 2)   // skip LOW
                 pbd._agent.nextPosition = data.position;
         }
@@ -285,6 +307,7 @@ public class CLODPBDSolverJobs : MonoBehaviour
         if (_agentDataArray.IsCreated)  _agentDataArray.Dispose();
         if (_corrections.IsCreated)     _corrections.Dispose();
         if (_correctionCounts.IsCreated)_correctionCounts.Dispose();
+        if (_frustumPlanes.IsCreated)   _frustumPlanes.Dispose();
         if (_transformArray.isCreated)  _transformArray.Dispose();
         if (_spatialHashMap.IsCreated)  _spatialHashMap.Dispose();
         if (_highIndices.IsCreated)     _highIndices.Dispose();
@@ -304,32 +327,40 @@ public class CLODPBDSolverJobs : MonoBehaviour
 // =============================================================================
 
 // ---------------------------------------------------------------------------
-// LOD categorisation — runs once per frame, single-threaded.
-// Uses a 10 % hysteresis band per tier so agents don't flicker at boundaries.
-// Writes lastLodLevel back into the agent data for next-frame hysteresis.
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// LOD categorisation with three enhancements:
-//   1. Frustum-aware  — agents behind the camera are forced to LOW
-//   2. Adaptive       — distances pre-scaled by caller based on FPS
-//   3. Density-aware  — agents with many collisions last frame are promoted
+// Importance-driven LOD categorisation — runs once per frame.
+// Computes normalized importance score [0, 1] from:
+//   1. Distance    (proximity to focus point / camera)
+//   2. Visibility  (camera frustum planes or forward half-space)
+//   3. Interaction (active collision contacts from previous frame)
+//   4. Density     (live local agent count in spatial hash cell)
+// Assigns fidelity tier (0=HIGH, 1=MED, 2=LOW) with hysteresis.
 // ---------------------------------------------------------------------------
 [BurstCompile]
 public struct CategorizeLODJob : IJob
 {
     public  NativeArray<CLODAgentData> Agents;
     public  float3 FocusPoint;
-    public  float  HighLodDistSq;
-    public  float  MedLodDistSq;
-    public  float  Hysteresis;
+    public  float3 CameraPos;
+    public  float3 CameraForward;   // must be normalised before scheduling
+    public  int    HasFrustumPlanes;
+    [ReadOnly] public NativeArray<float4> FrustumPlanes;
+    [ReadOnly] public NativeParallelMultiHashMap<int, int> HashMap;
+    public  float  CellSize;
 
-    // Frustum culling
-    public float3 CameraPos;
-    public float3 CameraForward;   // must be normalised before scheduling
-
-    // Density-aware promotion
+    // Interaction from previous frame
     [ReadOnly] public NativeArray<int> PrevCorrectionCounts;
-    public int DensityThreshold;
+
+    // Importance weights & thresholds
+    public float WeightDistance;
+    public float WeightVisibility;
+    public float WeightInteraction;
+    public float WeightDensity;
+    public float HighImportanceThresh;
+    public float MedImportanceThresh;
+    public float Hysteresis;
+    public float MaxImportanceDist;
+    public int   MaxInteractionContacts;
+    public int   MaxImportanceDensity;
 
     public NativeList<int> HighIndices;
     public NativeList<int> MedIndices;
@@ -341,61 +372,80 @@ public struct CategorizeLODJob : IJob
         MedIndices.Clear();
         LowIndices.Clear();
 
-        float hOuter = 1f + Hysteresis;
-        float hInner = 1f - Hysteresis;
+        float totalWeight = math.max(WeightDistance + WeightVisibility + WeightInteraction + WeightDensity, 1e-5f);
 
         for (int i = 0; i < Agents.Length; i++)
         {
             CLODAgentData agent = Agents[i];
             int prev = agent.lastLodLevel;
-            int next;
 
-            // ── 1. Frustum cull ────────────────────────────────────────────
-            // Agent is in the half-space behind the camera → always LOW.
-            // Avoids wasting HIGH/MED compute on invisible agents.
-            float3 toAgent = agent.position - CameraPos;
-            bool behindCamera = math.dot(toAgent, CameraForward) < 0f;
+            // 1. Distance score [0, 1]
+            float dist = math.distance(agent.position, FocusPoint);
+            float distScore = math.saturate(1f - dist / MaxImportanceDist);
 
-            if (behindCamera)
+            // 2. Visibility score [0, 1]
+            bool visible = true;
+            if (HasFrustumPlanes == 1)
             {
-                next = 2;
+                for (int p = 0; p < 6; p++)
+                {
+                    if (math.dot(FrustumPlanes[p].xyz, agent.position) + FrustumPlanes[p].w < 0f)
+                    {
+                        visible = false;
+                        break;
+                    }
+                }
             }
             else
             {
-                // ── 2. Distance-based categorisation (with hysteresis) ─────
-                float distSq = math.lengthsq(toAgent);
+                visible = math.dot(agent.position - CameraPos, CameraForward) >= 0f;
+            }
+            float visScore = visible ? 1f : 0f;
 
-                if (prev == 0)       // was HIGH — hold until clearly past boundary
-                {
-                    float outerHighSq = HighLodDistSq * hOuter * hOuter;
-                    float outerMedSq  = MedLodDistSq  * hOuter * hOuter;
-                    if      (distSq < outerHighSq) next = 0;
-                    else if (distSq < outerMedSq)  next = 1;
-                    else                           next = 2;
-                }
-                else if (prev == 1)  // was MED
-                {
-                    float innerHighSq = HighLodDistSq * hInner * hInner;
-                    float outerMedSq  = MedLodDistSq  * hOuter * hOuter;
-                    if      (distSq < innerHighSq) next = 0;
-                    else if (distSq < outerMedSq)  next = 1;
-                    else                           next = 2;
-                }
-                else                 // was LOW
-                {
-                    float innerMedSq = MedLodDistSq * hInner * hInner;
-                    if      (distSq < HighLodDistSq) next = 0;
-                    else if (distSq < innerMedSq)    next = 1;
-                    else                             next = 2;
-                }
+            // 3. Interaction score [0, 1]
+            float interScore = math.saturate((float)PrevCorrectionCounts[i] / MaxInteractionContacts);
 
-                // ── 3. Density-aware promotion ─────────────────────────────
-                // If the agent had many collisions last frame it's in a dense
-                // cluster — promote it one tier to get better collision resolution.
-                if (next > 0 && PrevCorrectionCounts[i] >= DensityThreshold)
-                    next--;
+            // 4. Local crowd density score [0, 1]
+            int2 cell = new int2((int)math.floor(agent.predictedPosition.x / CellSize),
+                                 (int)math.floor(agent.predictedPosition.z / CellSize));
+            int hash = (cell.x * 73856093) ^ (cell.y * 19349663);
+            int localDensity = 0;
+            if (HashMap.TryGetFirstValue(hash, out int nb, out var it))
+            {
+                do { localDensity++; }
+                while (HashMap.TryGetNextValue(out nb, ref it));
+            }
+            float densityScore = math.saturate((float)localDensity / MaxImportanceDensity);
+
+            // Combined importance score
+            float importance = math.saturate(
+                (WeightDistance * distScore +
+                 WeightVisibility * visScore +
+                 WeightInteraction * interScore +
+                 WeightDensity * densityScore) / totalWeight);
+
+            // Dynamic fidelity assignment with hysteresis
+            int next;
+            if (prev == 0)
+            {
+                if      (importance >= HighImportanceThresh - Hysteresis) next = 0;
+                else if (importance >= MedImportanceThresh  - Hysteresis) next = 1;
+                else                                                      next = 2;
+            }
+            else if (prev == 1)
+            {
+                if      (importance >= HighImportanceThresh + Hysteresis) next = 0;
+                else if (importance >= MedImportanceThresh  - Hysteresis) next = 1;
+                else                                                      next = 2;
+            }
+            else
+            {
+                if      (importance >= HighImportanceThresh + Hysteresis) next = 0;
+                else if (importance >= MedImportanceThresh  + Hysteresis) next = 1;
+                else                                                      next = 2;
             }
 
+            agent.importanceScore = importance;
             agent.lastLodLevel = next;
             Agents[i] = agent;
 
@@ -433,6 +483,26 @@ public struct CLODClearHashMapJob : IJob
 {
     public NativeParallelMultiHashMap<int, int> HashMap;
     public void Execute() { HashMap.Clear(); }
+}
+
+// ---------------------------------------------------------------------------
+// Hash all agents in parallel into the spatial map
+// ---------------------------------------------------------------------------
+[BurstCompile]
+public struct CLODHashAllPositionsJob : IJobParallelFor
+{
+    [ReadOnly] public NativeArray<CLODAgentData> Agents;
+    public NativeParallelMultiHashMap<int, int>.ParallelWriter HashMap;
+    public float CellSize;
+
+    public void Execute(int idx)
+    {
+        float3 pos  = Agents[idx].predictedPosition;
+        int2   cell = new int2((int)math.floor(pos.x / CellSize),
+                               (int)math.floor(pos.z / CellSize));
+        int hash = (cell.x * 73856093) ^ (cell.y * 19349663);
+        HashMap.Add(hash, idx);
+    }
 }
 
 // ---------------------------------------------------------------------------

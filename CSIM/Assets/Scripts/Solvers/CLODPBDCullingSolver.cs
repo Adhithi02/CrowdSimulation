@@ -23,6 +23,7 @@ public struct CullAgentData
     public float ksi;
     public float radius;
     public float mass;
+    public float importanceScore;
     public int lastLodLevel;
     public int isVisible; // 1 = true, 0 = false
 }
@@ -59,6 +60,18 @@ public class CLODPBDCullingSolver : MonoBehaviour
 
     [Header("Spatial Collision Grid")]
     public float gridCellSize = 4f;
+
+    [Header("Importance Scoring (Synced by SimulationManager)")]
+    public float weightDistance = 0.30f;
+    public float weightVisibility = 0.25f;
+    public float weightInteraction = 0.20f;
+    public float weightDensity = 0.25f;
+    public float highImportanceThreshold = 0.60f;
+    public float medImportanceThreshold = 0.30f;
+    public float importanceHysteresis = 0.05f;
+    public float maxImportanceDistance = 60f;
+    public int maxInteractionContacts = 6;
+    public int maxImportanceDensity = 12;
 
     // ── Native collections ────────────────────────────────────────────────────
 
@@ -151,6 +164,7 @@ public class CLODPBDCullingSolver : MonoBehaviour
                 ksi = pbd.ksi,
                 radius = pbd.radius,
                 mass = pbd.mass,
+                importanceScore = _agentData[i].importanceScore,
                 lastLodLevel = _agentData[i].lastLodLevel
             };
         }
@@ -189,16 +203,25 @@ public class CLODPBDCullingSolver : MonoBehaviour
             CellSize = heatmapCellSize
         }.Schedule(handle);
 
-        // 4. Categorise & Cull
+        // 4. Categorise & Cull (Importance-Driven Dynamic Fidelity)
         handle = new CategorizeAndCullJob
         {
             Agents = _agentData,
             FrustumPlanes = _frustumPlanes,
             PredictedHeatmap = _predictedHeatmap,
+            PrevCorrectionCounts = _correctionCounts,
+            FocusPoint = focusPoint,
             HeatmapCellSize = heatmapCellSize,
-            HighDensityCutoff = highDensityCutoff,
-            MedDensityCutoff = medDensityCutoff,
-            DensityHysteresis = densityHysteresis,
+            WeightDistance = weightDistance,
+            WeightVisibility = weightVisibility,
+            WeightInteraction = weightInteraction,
+            WeightDensity = weightDensity,
+            HighImportanceThresh = highImportanceThreshold,
+            MedImportanceThresh = medImportanceThreshold,
+            ImportanceHysteresis = importanceHysteresis,
+            MaxImportanceDist = math.max(maxImportanceDistance, 1f),
+            MaxInteractionContacts = math.max(maxInteractionContacts, 1),
+            MaxImportanceDensity = math.max(maxImportanceDensity, 1),
             HighIndices = _highIdx,
             MedIndices = _medIdx,
             LowIndices = _lowIdx
@@ -212,6 +235,9 @@ public class CLODPBDCullingSolver : MonoBehaviour
         handle = ScheduleHash(_highIdx, handle);
         handle = ScheduleHash(_medIdx, handle);
         handle = ScheduleHash(_lowIdx, handle);
+
+        bool resolveLowThisFrame = Time.frameCount % 4 == 0;
+        int medIterationCap = math.max(1, (iterations + 1) / 2);
 
         // 7. Constraint Iterations
         for (int iter = 0; iter < iterations; iter++)
@@ -227,19 +253,22 @@ public class CLODPBDCullingSolver : MonoBehaviour
                 CellSize = gridCellSize
             }.Schedule(_highIdx, 64, handle);
 
-            // MED - Single Cell
-            handle = new CullMedConstraintJob
+            // MED - Single Cell, half-budget iterations
+            if (iter < medIterationCap)
             {
-                Indices = _medIdx.AsDeferredJobArray(),
-                AgentsIn = _agentData,
-                HashMap = _hashMap,
-                PositionCorrections = _corrections,
-                CorrectionCounts = _correctionCounts,
-                CellSize = gridCellSize
-            }.Schedule(_medIdx, 64, handle);
+                handle = new CullMedConstraintJob
+                {
+                    Indices = _medIdx.AsDeferredJobArray(),
+                    AgentsIn = _agentData,
+                    HashMap = _hashMap,
+                    PositionCorrections = _corrections,
+                    CorrectionCounts = _correctionCounts,
+                    CellSize = gridCellSize
+                }.Schedule(_medIdx, 64, handle);
+            }
 
-            // LOW - Single Iteration, Single Cell (Run every frame to prevent explosion)
-            if (iter == 0)
+            // LOW - Single Iteration, Single Cell, every 4th frame
+            if (iter == 0 && resolveLowThisFrame)
             {
                 handle = new CullLowConstraintJob
                 {
@@ -254,8 +283,8 @@ public class CLODPBDCullingSolver : MonoBehaviour
             }
 
             handle = ScheduleApply(_highIdx, handle);
-            handle = ScheduleApply(_medIdx, handle);
-            if (iter == 0) handle = ScheduleApply(_lowIdx, handle);
+            if (iter < medIterationCap) handle = ScheduleApply(_medIdx, handle);
+            if (iter == 0 && resolveLowThisFrame) handle = ScheduleApply(_lowIdx, handle);
         }
 
         // 8. Finalise and Apply
@@ -309,7 +338,10 @@ public class CLODPBDCullingSolver : MonoBehaviour
             if (pbd == null) continue;
             pbd.velocity = data.velocity;
             pbd.predictedPosition = data.predictedPosition;
-            if (pbd._agent != null) pbd._agent.nextPosition = data.position;
+            pbd.importanceScore = data.importanceScore;
+            pbd.fidelityLevel = data.lastLodLevel;
+            if (pbd._agent != null && data.lastLodLevel < 2)
+                pbd._agent.nextPosition = data.position;
         }
     }
 
@@ -442,11 +474,20 @@ public struct CategorizeAndCullJob : IJob
     public NativeArray<CullAgentData> Agents;
     [ReadOnly] public NativeArray<float4> FrustumPlanes;
     [ReadOnly] public NativeParallelMultiHashMap<int, int> PredictedHeatmap;
+    [ReadOnly] public NativeArray<int> PrevCorrectionCounts;
 
+    public float3 FocusPoint;
     public float HeatmapCellSize;
-    public int HighDensityCutoff;
-    public int MedDensityCutoff;
-    public int DensityHysteresis;
+    public float WeightDistance;
+    public float WeightVisibility;
+    public float WeightInteraction;
+    public float WeightDensity;
+    public float HighImportanceThresh;
+    public float MedImportanceThresh;
+    public float ImportanceHysteresis;
+    public float MaxImportanceDist;
+    public int MaxInteractionContacts;
+    public int MaxImportanceDensity;
 
     public NativeList<int> HighIndices;
     public NativeList<int> MedIndices;
@@ -458,11 +499,13 @@ public struct CategorizeAndCullJob : IJob
         MedIndices.Clear();
         LowIndices.Clear();
 
+        float totalWeight = math.max(WeightDistance + WeightVisibility + WeightInteraction + WeightDensity, 1e-5f);
+
         for (int i = 0; i < Agents.Length; i++)
         {
             CullAgentData a = Agents[i];
 
-            // 1. Calculate Visibility
+            // 1. Visibility (Frustum test)
             bool visible = true;
             for (int p = 0; p < 6; p++)
             {
@@ -473,8 +516,16 @@ public struct CategorizeAndCullJob : IJob
                 }
             }
             a.isVisible = visible ? 1 : 0;
+            float visScore = visible ? 1f : 0f;
 
-            // 2. Sample Local Predictive Density
+            // 2. Distance score
+            float dist = math.distance(a.position, FocusPoint);
+            float distScore = math.saturate(1f - dist / MaxImportanceDist);
+
+            // 3. Interaction score (previous frame contact count)
+            float interScore = math.saturate((float)PrevCorrectionCounts[i] / MaxInteractionContacts);
+
+            // 4. Local Predictive Density score
             int cx = (int)math.floor(a.position.x / HeatmapCellSize);
             int cz = (int)math.floor(a.position.z / HeatmapCellSize);
             int hash = (cx * 73856093) ^ (cz * 19349663);
@@ -485,16 +536,38 @@ public struct CategorizeAndCullJob : IJob
                 do { localDensity += d; }
                 while (PredictedHeatmap.TryGetNextValue(out d, ref it));
             }
+            float densityScore = math.saturate((float)localDensity / MaxImportanceDensity);
 
-            // 3. Assign Physics LOD based on Density
+            // 5. Combined Importance Score [0, 1]
+            float importance = math.saturate(
+                (WeightDistance * distScore +
+                 WeightVisibility * visScore +
+                 WeightInteraction * interScore +
+                 WeightDensity * densityScore) / totalWeight);
+
+            // 6. Assign Physics Fidelity based on Importance (with hysteresis)
             int prev = a.lastLodLevel;
-            int highThreshold = prev == 0 ? HighDensityCutoff - DensityHysteresis : HighDensityCutoff;
-            int medThreshold = prev == 1 ? MedDensityCutoff - DensityHysteresis : MedDensityCutoff;
+            int next;
+            if (prev == 0)
+            {
+                if      (importance >= HighImportanceThresh - ImportanceHysteresis) next = 0;
+                else if (importance >= MedImportanceThresh  - ImportanceHysteresis) next = 1;
+                else                                                              next = 2;
+            }
+            else if (prev == 1)
+            {
+                if      (importance >= HighImportanceThresh + ImportanceHysteresis) next = 0;
+                else if (importance >= MedImportanceThresh  - ImportanceHysteresis) next = 1;
+                else                                                              next = 2;
+            }
+            else
+            {
+                if      (importance >= HighImportanceThresh + ImportanceHysteresis) next = 0;
+                else if (importance >= MedImportanceThresh  + ImportanceHysteresis) next = 1;
+                else                                                              next = 2;
+            }
 
-            int next = 2; // Default Low
-            if (localDensity >= highThreshold) next = 0;
-            else if (localDensity >= medThreshold) next = 1;
-
+            a.importanceScore = importance;
             a.lastLodLevel = next;
             Agents[i] = a;
 

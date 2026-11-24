@@ -49,6 +49,12 @@ public class AgentBase : MonoBehaviour
     [HideInInspector] public Vector3 F;
     [HideInInspector] public Transform goal;
 
+    [Header("Importance & Fidelity (Runtime)")]
+    [Tooltip("Normalized importance score in [0, 1] computed from distance, visibility, interaction, and local density.")]
+    [Range(0f, 1f)] public float importanceScore = 0.5f;
+    [Tooltip("Assigned simulation fidelity tier: 0 = HIGH, 1 = MED, 2 = LOW.")]
+    public int fidelityLevel = 0;
+
     [HideInInspector] public List<AgentBase> neighbours = new();
 
     public float perceptionRadius => neighborDist;
