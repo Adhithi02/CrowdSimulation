@@ -102,6 +102,12 @@ public class ProfilerManager : MonoBehaviour
         return float.NaN;
     }
 
+    public void ResetMeasurements()
+    {
+        _starts.Clear();
+        _buffers.Clear();
+    }
+
     /// Call once per frame to optionally log CSV row. call at end of Update()
     public void LogFrameData(int frameNumber)
     {

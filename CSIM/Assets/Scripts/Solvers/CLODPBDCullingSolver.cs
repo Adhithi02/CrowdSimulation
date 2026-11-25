@@ -307,7 +307,9 @@ public class CLODPBDCullingSolver : MonoBehaviour
 
     private void RefreshFrustumPlanes()
     {
-        Camera cam = protagonistCamera != null ? protagonistCamera : Camera.main;
+        Camera cam = protagonistCamera != null && protagonistCamera.isActiveAndEnabled
+            ? protagonistCamera
+            : Camera.main;
         if (cam == null) return;
         Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
         for (int p = 0; p < 6; p++)

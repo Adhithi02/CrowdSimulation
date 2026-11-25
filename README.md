@@ -259,6 +259,12 @@ Call `ProfilerManager.Instance.GetAverageMs("Solver")` from any script, or open 
 5. Note the `solver_ms` value in the CSV or Profiler, then switch solver/preset for the next run.
 6. Disable Play mode when finished; the CSV is flushed and closed automatically.
 
+### Side-by-side Solver Comparison
+
+In the Steering Demo, expand the runtime control panel and click **Compare All Solvers** or **Compare CPU vs GPU PBD**. Both run sequentially with the Circle preset, a 1-second warm-up, and a 5-second measurement window. The focused comparison pairs `PBDJobs` (CPU Jobs/Burst) with `PBDCompute` (GPU compute shader). It captures a Game view image per solver and opens an HTML report with screenshots and metrics.
+
+Reports and `metrics.csv` are saved under `Application.persistentDataPath/SolverComparisons/<comparison>-<timestamp>/`. They include FPS, script-frame and CPU solver-call timings; the GPU PBD run also records a GPU-timed `PBDCompute.GPU` marker when supported by the graphics device. `n/a` means the Unity profiler/device did not provide that GPU sample. The original solver and scene preset are restored when a run finishes. Choose a lower agent count first if the current machine struggles with the 300-agent scene.
+
 ---
 
 ## Project Structure

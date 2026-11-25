@@ -31,11 +31,16 @@
 
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Unity.Profiling;
+using Unity.Profiling.LowLevel;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 public class PBDComputeSolver : MonoBehaviour
 {
+    private static readonly ProfilerMarker GpuSolveMarker = new ProfilerMarker(
+        ProfilerCategory.Render, "PBDCompute.GPU", MarkerFlags.SampleGPU);
+
     // ── Inspector ─────────────────────────────────────────────────────────────
 
     [Header("Shader")]
@@ -194,27 +199,35 @@ public class PBDComputeSolver : MonoBehaviour
         // 2 ── Per-frame uniforms ──────────────────────────────────────────────
         SetUniforms(n, dt, iterations, focusPoint);
 
-        // 3 ── Predict (velocity blend + position integration) ────────────────
-        computeShader.Dispatch(_kPredict, _agentGroups, 1, 1);
-
-        // 4 ── Build density heatmap (Clear → Hash → AssignLOD) ───────────────
-        //  These three kernels form the heatmap pipeline.  They run once per
-        //  frame (not per iteration) — density is stable across Jacobi passes.
-        computeShader.Dispatch(_kClear,     _clearGroups,  1, 1);
-        computeShader.Dispatch(_kHash,      _agentGroups,  1, 1);
-        computeShader.Dispatch(_kAssignLOD, _agentGroups,  1, 1);
-
-        // 5 ── Constraint iterations (Solve → Apply) ──────────────────────────
-        //  The hash grid is already built; we reuse it every iteration.
-        for (int iter = 0; iter < iterations; iter++)
+        GpuSolveMarker.Begin();
+        try
         {
-            computeShader.SetInt("_CurrentIteration", iter);
-            computeShader.Dispatch(_kSolve, _agentGroups, 1, 1);
-            computeShader.Dispatch(_kApply, _agentGroups, 1, 1);
-        }
+            // 3 ── Predict (velocity blend + position integration) ────────────
+            computeShader.Dispatch(_kPredict, _agentGroups, 1, 1);
 
-        // 6 ── Finalize (commit velocity + position) ──────────────────────────
-        computeShader.Dispatch(_kFinalize, _agentGroups, 1, 1);
+            // 4 ── Build density heatmap (Clear → Hash → AssignLOD) ───────────
+            //  These three kernels form the heatmap pipeline.  They run once per
+            //  frame (not per iteration) — density is stable across Jacobi passes.
+            computeShader.Dispatch(_kClear,     _clearGroups,  1, 1);
+            computeShader.Dispatch(_kHash,      _agentGroups, 1, 1);
+            computeShader.Dispatch(_kAssignLOD, _agentGroups, 1, 1);
+
+            // 5 ── Constraint iterations (Solve → Apply) ──────────────────────
+            //  The hash grid is already built; we reuse it every iteration.
+            for (int iter = 0; iter < iterations; iter++)
+            {
+                computeShader.SetInt("_CurrentIteration", iter);
+                computeShader.Dispatch(_kSolve, _agentGroups, 1, 1);
+                computeShader.Dispatch(_kApply, _agentGroups, 1, 1);
+            }
+
+            // 6 ── Finalize (commit velocity + position) ───────────────────────
+            computeShader.Dispatch(_kFinalize, _agentGroups, 1, 1);
+        }
+        finally
+        {
+            GpuSolveMarker.End();
+        }
 
         // 7 ── Async readback (1-2 frame lag — acceptable for NavMesh/Transforms)
         if (!_readbackPending)

@@ -1015,7 +1015,8 @@ public class SimulationManager : MonoBehaviour
             _cullingSolver.maxImportanceDistance = maxImportanceDistance;
             _cullingSolver.maxInteractionContacts = maxInteractionContacts;
             _cullingSolver.maxImportanceDensity = maxImportanceDensity;
-            if (_cullingSolver.protagonistCamera == null && cam != null)
+            if (cam != null &&
+                (enforceBenchmarkCameraProtocol || _cullingSolver.protagonistCamera == null))
                 _cullingSolver.protagonistCamera = cam;
         }
     }

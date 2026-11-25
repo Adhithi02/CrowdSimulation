@@ -1762,8 +1762,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d479ac8ecfddb4116abfbe7ff0866ac5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  panelWidth: 680
-  fontSize: 20
+  panelWidth: 440
+  fontSize: 18
 --- !u!114 &1044846251
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1873,7 +1873,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c2c3313060b543d4c94874da0fb29de6, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  protagonistCamera: {fileID: 174585112}
+  protagonistCamera: {fileID: 841642505}
   frustumMargin: 0.12
   highLodDistance: 20
   medLodDistance: 50
