@@ -431,6 +431,10 @@ public sealed class PBDCudaVisualLodController : MonoBehaviour
     {
         if (!showDiagnostics) return;
 
+        // Position on the upper-right corner so it never collides with the OCC panel on the left
+        _diagnosticsRect.x = Mathf.Max(16f, Screen.width - _diagnosticsRect.width - 20f);
+        _diagnosticsRect.y = 20f;
+
         GUI.Box(_diagnosticsRect, "PBDCuda Presentation LOD");
         GUILayout.BeginArea(new Rect(_diagnosticsRect.x + 12f, _diagnosticsRect.y + 26f,
             _diagnosticsRect.width - 24f, _diagnosticsRect.height - 36f));

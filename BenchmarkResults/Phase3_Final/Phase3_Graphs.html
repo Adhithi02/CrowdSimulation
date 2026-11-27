@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    canvas { display: block; }
+    .tab-btn { cursor: pointer; padding: 6px 14px; border-radius: 6px; font-size: 12px; transition: all 0.15s; }
+    .tab-btn.active { background: var(--primary); color: var(--primary-foreground); }
+    .tab-btn:not(.active) { background: var(--card); color: var(--muted-foreground); border: 1px solid var(--border); }
+    .tab-btn:not(.active):hover { background: var(--accent); }
+  </style>
+</head>
+<body class="bg-[var(--background)] text-[var(--foreground)] antialiased p-4 m-0">
+  <div class="max-w-4xl mx-auto space-y-4">
+    <div class="text-center pb-2 border-b border-[var(--card-border)]">
+      <h1 class="text-lg font-bold">Phase 3 — Final Performance Evaluation</h1>
+      <p class="text-xs text-[var(--muted-foreground)]">RTX 2050 Mobile (sm_86) · CUDA 13.5 · 20 trials per config · Seed 4142026</p>
+    </div>
+
+    <div class="flex flex-wrap gap-2 justify-center" id="tabs">
+      <button class="tab-btn active" onclick="showTab(0)">A: Scalability</button>
+      <button class="tab-btn" onclick="showTab(1)">B: Pipeline</button>
+      <button class="tab-btn" onclick="showTab(2)">C: AoS vs SoA</button>
+      <button class="tab-btn" onclick="showTab(3)">D: PBD Convergence</button>
+      <button class="tab-btn" onclick="showTab(4)">E: LOD Ablation</button>
+    </div>
+
+    <div id="panel-0" class="bg-[var(--card)] border border-[var(--border)] rounded-lg p-4">
+      <h2 class="text-sm font-semibold mb-1">Experiment A — CPU vs CUDA Scalability</h2>
+      <p class="text-xs text-[var(--muted-foreground)] mb-3">Log scale. CPU BF at 5000 = TIMEOUT (>10s).</p>
+      <canvas id="chartA" width="740" height="320"></canvas>
+      <div class="mt-3 grid grid-cols-4 gap-2 text-xs">
+        <div class="bg-[var(--content)] p-2 rounded text-center"><div class="text-[var(--muted-foreground)]">500 agents</div><div class="font-mono font-bold text-[var(--success)]">164.5× total</div></div>
+        <div class="bg-[var(--content)] p-2 rounded text-center"><div class="text-[var(--muted-foreground)]">1000 agents</div><div class="font-mono font-bold text-[var(--success)]">96.9× total</div></div>
+        <div class="bg-[var(--content)] p-2 rounded text-center"><div class="text-[var(--muted-foreground)]">2500 agents</div><div class="font-mono font-bold text-[var(--success)]">358.3× total</div></div>
+        <div class="bg-[var(--content)] p-2 rounded text-center"><div class="text-[var(--muted-foreground)]">5000 agents</div><div class="font-mono font-bold text-[var(--success)]">180.6× vs SH</div></div>
+      </div>
+    </div>
+
+    <div id="panel-1" class="bg-[var(--card)] border border-[var(--border)] rounded-lg p-4 hidden">
+      <h2 class="text-sm font-semibold mb-1">Experiment B — CUDA Pipeline Stage Breakdown</h2>
+      <p class="text-xs text-[var(--muted-foreground)] mb-3">Stacked bar: mean stage times (ms). Solve dominates at all scales.</p>
+      <canvas id="chartB" width="740" height="300"></canvas>
+      <div class="mt-3 text-xs text-[var(--muted-foreground)]">
+        Sum-of-stages discrepancy: 0.07–0.12 ms (stream synchronization overhead)
+      </div>
+    </div>
+
+    <div id="panel-2" class="bg-[var(--card)] border border-[var(--border)] rounded-lg p-4 hidden">
+      <h2 class="text-sm font-semibold mb-1">Experiment C — AoS vs SoA Solver Kernel</h2>
+      <p class="text-xs text-[var(--muted-foreground)] mb-3">Solver-kernel-only timing. SoA achieves 2.4–3.0× speedup via coalesced memory access.</p>
+      <canvas id="chartC" width="740" height="300"></canvas>
+    </div>
+
+    <div id="panel-3" class="bg-[var(--card)] border border-[var(--border)] rounded-lg p-4 hidden">
+      <h2 class="text-sm font-semibold mb-1">Experiment D — PBD Convergence (2500 agents)</h2>
+      <p class="text-xs text-[var(--muted-foreground)] mb-3">Dual axis: solver time vs average penetration. Diminishing returns beyond 8 iterations.</p>
+      <canvas id="chartD" width="740" height="300"></canvas>
+    </div>
+
+    <div id="panel-4" class="bg-[var(--card)] border border-[var(--border)] rounded-lg p-4 hidden">
+      <h2 class="text-sm font-semibold mb-1">Experiment E — LOD Ablation (2500 agents)</h2>
+      <p class="text-xs text-[var(--muted-foreground)] mb-3">LOD level distribution and solver time across 4 ablation modes.</p>
+      <canvas id="chartE" width="740" height="300"></canvas>
+    </div>
+  </div>
+
+<script>
+const CS = getComputedStyle(document.documentElement);
+const fg = CS.getPropertyValue('--foreground').trim() || '#e0e0e0';
+const muted = CS.getPropertyValue('--muted-foreground').trim() || '#888';
+const c1 = CS.getPropertyValue('--chart-1').trim() || '#4f46e5';
+const c2 = CS.getPropertyValue('--chart-2').trim() || '#06b6d4';
+const c3 = CS.getPropertyValue('--chart-3').trim() || '#10b981';
+const c4 = CS.getPropertyValue('--chart-4').trim() || '#f59e0b';
+const c5 = CS.getPropertyValue('--chart-5').trim() || '#ef4444';
+const c6 = CS.getPropertyValue('--chart-6').trim() || '#8b5cf6';
+const grid = CS.getPropertyValue('--border').trim() || '#333';
+
+function showTab(i) {
+  for(let t=0;t<5;t++){
+    document.getElementById('panel-'+t).classList.toggle('hidden',t!==i);
+    document.getElementById('tabs').children[t].classList.toggle('active',t===i);
+  }
+}
+
+// ── CHART A: Scalability (log-scale bar chart) ──
+(function(){
+  const cv=document.getElementById('chartA'), ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height, pad={t:30,b:50,l:70,r:20};
+  const pw=W-pad.l-pad.r, ph=H-pad.t-pad.b;
+
+  const agents=[500,1000,2500,5000];
+  const cpuBF=[83.81,429.08,2603.58,null];
+  const cpuSH=[5.83,32.76,161.95,2066.97];
+  const cuda=[0.509,4.428,7.266,11.441];
+
+  const maxV=Math.log10(10000);
+  const minV=Math.log10(0.1);
+  function yPos(v){return pad.t+ph*(1-(Math.log10(Math.max(v,0.1))-minV)/(maxV-minV));}
+
+  ctx.fillStyle='transparent'; ctx.fillRect(0,0,W,H);
+
+  // Grid
+  [0.1,1,10,100,1000,10000].forEach(v=>{
+    let y=yPos(v);
+    ctx.strokeStyle=grid; ctx.lineWidth=0.5; ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=muted; ctx.font='11px monospace'; ctx.textAlign='right';
+    ctx.fillText(v>=1?v.toFixed(0):v.toFixed(1)+' ms',pad.l-6,y+4);
+  });
+
+  const gw=pw/agents.length;
+  const bw=gw*0.22;
+  agents.forEach((a,i)=>{
+    let cx=pad.l+gw*i+gw/2;
+    // CPU BF
+    if(cpuBF[i]!==null){
+      ctx.fillStyle=c5;
+      let y=yPos(cpuBF[i]);
+      ctx.fillRect(cx-bw*1.5,y,bw,pad.t+ph-y);
+      ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+      ctx.fillText(cpuBF[i].toFixed(0),cx-bw,y-4);
+    } else {
+      ctx.fillStyle=c5;ctx.font='9px monospace';ctx.textAlign='center';
+      ctx.fillText('TIMEOUT',cx-bw,pad.t+10);
+    }
+    // CPU SH
+    ctx.fillStyle=c4;
+    let ySH=yPos(cpuSH[i]);
+    ctx.fillRect(cx-bw*0.5,ySH,bw,pad.t+ph-ySH);
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(cpuSH[i].toFixed(1),cx,ySH-4);
+    // CUDA
+    ctx.fillStyle=c3;
+    let yC=yPos(cuda[i]);
+    ctx.fillRect(cx+bw*0.5,yC,bw,pad.t+ph-yC);
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(cuda[i].toFixed(2),cx+bw,yC-4);
+
+    ctx.fillStyle=muted;ctx.font='11px sans-serif';ctx.textAlign='center';
+    ctx.fillText(a.toString(),cx,H-pad.b+18);
+  });
+
+  // Legend
+  [[c5,'CPU BF (O(N²))'],[c4,'CPU Spatial Hash'],[c3,'CUDA Spatial Hash']].forEach(([col,lbl],i)=>{
+    let lx=pad.l+i*180, ly=H-10;
+    ctx.fillStyle=col;ctx.fillRect(lx,ly-8,10,10);
+    ctx.fillStyle=muted;ctx.font='10px sans-serif';ctx.textAlign='left';ctx.fillText(lbl,lx+14,ly+1);
+  });
+
+  ctx.fillStyle=fg;ctx.font='11px sans-serif';ctx.textAlign='center';
+  ctx.fillText('Agent Count',W/2,H-pad.b+34);
+  ctx.save();ctx.translate(14,H/2);ctx.rotate(-Math.PI/2);ctx.fillText('Step Time (ms, log scale)',0,0);ctx.restore();
+})();
+
+// ── CHART B: Pipeline Stacked Bar ──
+(function(){
+  const cv=document.getElementById('chartB'), ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height, pad={t:20,b:50,l:60,r:20};
+  const pw=W-pad.l-pad.r, ph=H-pad.t-pad.b;
+
+  const agents=[500,1000,2500,5000];
+  const stages=[
+    {l:'H2D',   d:[0.059,0.085,0.189,0.324],c:c1},
+    {l:'Predict',d:[0.038,0.193,0.201,0.170],c:c2},
+    {l:'Clear',  d:[0.297,0.301,0.280,0.276],c:c6},
+    {l:'Hash',   d:[0.051,0.031,0.075,0.057],c:'#64748b'},
+    {l:'LOD',    d:[0.021,0.023,0.035,0.098],c:c4},
+    {l:'Solve',  d:[1.094,1.726,4.348,7.961],c:c5},
+    {l:'Finalize',d:[0.012,0.013,0.017,0.027],c:'#a855f7'},
+    {l:'D2H',   d:[0.294,0.509,0.639,0.555],c:c3},
+  ];
+
+  const maxV=10;
+  function yPos(v){return pad.t+ph*(1-v/maxV);}
+  const gw=pw/agents.length, bw=gw*0.5;
+
+  [0,2,4,6,8,10].forEach(v=>{
+    let y=yPos(v);
+    ctx.strokeStyle=grid;ctx.lineWidth=0.5;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=muted;ctx.font='10px monospace';ctx.textAlign='right';ctx.fillText(v+' ms',pad.l-6,y+3);
+  });
+
+  agents.forEach((a,i)=>{
+    let cx=pad.l+gw*i+gw/2;
+    let base=pad.t+ph;
+    stages.forEach(s=>{
+      let h=(s.d[i]/maxV)*ph;
+      ctx.fillStyle=s.c;
+      ctx.fillRect(cx-bw/2,base-h,bw,h);
+      base-=h;
+    });
+    ctx.fillStyle=muted;ctx.font='11px sans-serif';ctx.textAlign='center';
+    ctx.fillText(a.toString(),cx,H-pad.b+16);
+  });
+
+  // Legend
+  stages.forEach((s,i)=>{
+    let lx=pad.l+(i%4)*170, ly=H-30+Math.floor(i/4)*14;
+    ctx.fillStyle=s.c;ctx.fillRect(lx,ly-7,8,8);
+    ctx.fillStyle=muted;ctx.font='9px sans-serif';ctx.textAlign='left';ctx.fillText(s.l,lx+11,ly);
+  });
+})();
+
+// ── CHART C: AoS vs SoA ──
+(function(){
+  const cv=document.getElementById('chartC'), ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height, pad={t:20,b:50,l:60,r:80};
+  const pw=W-pad.l-pad.r, ph=H-pad.t-pad.b;
+
+  const agents=[500,1000,2500,5000];
+  const aos=[1.028,1.402,2.685,3.882];
+  const soa=[0.449,0.546,0.899,1.334];
+  const spd=[2.36,2.57,2.99,2.91];
+
+  const maxV=4.5;
+  function yPos(v){return pad.t+ph*(1-v/maxV);}
+  const gw=pw/agents.length, bw=gw*0.25;
+
+  [0,1,2,3,4].forEach(v=>{
+    let y=yPos(v);
+    ctx.strokeStyle=grid;ctx.lineWidth=0.5;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=muted;ctx.font='10px monospace';ctx.textAlign='right';ctx.fillText(v+' ms',pad.l-6,y+3);
+  });
+
+  agents.forEach((a,i)=>{
+    let cx=pad.l+gw*i+gw/2;
+    // AoS
+    ctx.fillStyle=c5;
+    let yA=yPos(aos[i]);ctx.fillRect(cx-bw,yA,bw,pad.t+ph-yA);
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(aos[i].toFixed(2),cx-bw/2,yA-4);
+    // SoA
+    ctx.fillStyle=c3;
+    let yS=yPos(soa[i]);ctx.fillRect(cx,yS,bw,pad.t+ph-yS);
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(soa[i].toFixed(2),cx+bw/2,yS-4);
+    // Speedup label
+    ctx.fillStyle=c4;ctx.font='bold 10px monospace';
+    ctx.fillText(spd[i].toFixed(1)+'×',cx+bw/2,yS-16);
+
+    ctx.fillStyle=muted;ctx.font='11px sans-serif';ctx.textAlign='center';
+    ctx.fillText(a.toString(),cx,H-pad.b+16);
+  });
+
+  [[c5,'AoS'],[c3,'SoA']].forEach(([col,lbl],i)=>{
+    let lx=W-pad.r+8,ly=pad.t+30+i*18;
+    ctx.fillStyle=col;ctx.fillRect(lx,ly-7,10,8);
+    ctx.fillStyle=muted;ctx.font='10px sans-serif';ctx.textAlign='left';ctx.fillText(lbl,lx+14,ly);
+  });
+})();
+
+// ── CHART D: PBD Convergence (dual axis) ──
+(function(){
+  const cv=document.getElementById('chartD'), ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height, pad={t:20,b:50,l:60,r:70};
+  const pw=W-pad.l-pad.r, ph=H-pad.t-pad.b;
+
+  const iters=[1,2,4,8,12,16];
+  const solve=[0.598,1.054,2.163,3.894,4.679,5.402];
+  const avgPen=[0.3304,0.3237,0.3090,0.2741,0.2393,0.2078];
+
+  const maxSolve=6;
+  function ySolve(v){return pad.t+ph*(1-v/maxSolve);}
+  const maxPen=0.35, minPen=0.15;
+  function yPen(v){return pad.t+ph*(1-(v-minPen)/(maxPen-minPen));}
+
+  // Grid
+  [0,1,2,3,4,5,6].forEach(v=>{
+    let y=ySolve(v);
+    ctx.strokeStyle=grid;ctx.lineWidth=0.5;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=c2;ctx.font='10px monospace';ctx.textAlign='right';ctx.fillText(v+' ms',pad.l-6,y+3);
+  });
+
+  // Right axis labels
+  [0.15,0.20,0.25,0.30,0.35].forEach(v=>{
+    let y=yPen(v);
+    ctx.fillStyle=c5;ctx.font='10px monospace';ctx.textAlign='left';ctx.fillText(v.toFixed(2)+' m',W-pad.r+6,y+3);
+  });
+
+  // Solve line
+  ctx.strokeStyle=c2;ctx.lineWidth=2.5;ctx.beginPath();
+  iters.forEach((it,i)=>{
+    let x=pad.l+pw*(i/(iters.length-1));
+    let y=ySolve(solve[i]);
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });ctx.stroke();
+  iters.forEach((it,i)=>{
+    let x=pad.l+pw*(i/(iters.length-1));
+    let y=ySolve(solve[i]);
+    ctx.fillStyle=c2;ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(solve[i].toFixed(2),x,y-8);
+  });
+
+  // Penetration line
+  ctx.strokeStyle=c5;ctx.lineWidth=2.5;ctx.setLineDash([6,3]);ctx.beginPath();
+  iters.forEach((it,i)=>{
+    let x=pad.l+pw*(i/(iters.length-1));
+    let y=yPen(avgPen[i]);
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });ctx.stroke();ctx.setLineDash([]);
+  iters.forEach((it,i)=>{
+    let x=pad.l+pw*(i/(iters.length-1));
+    let y=yPen(avgPen[i]);
+    ctx.fillStyle=c5;ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(avgPen[i].toFixed(3),x,y+14);
+  });
+
+  iters.forEach((it,i)=>{
+    let x=pad.l+pw*(i/(iters.length-1));
+    ctx.fillStyle=muted;ctx.font='11px sans-serif';ctx.textAlign='center';
+    ctx.fillText(it.toString(),x,H-pad.b+16);
+  });
+
+  ctx.fillStyle=fg;ctx.font='11px sans-serif';ctx.textAlign='center';
+  ctx.fillText('PBD Iterations',W/2,H-pad.b+34);
+
+  [[c2,'— Solve Time (ms)'],[c5,'--- Avg Penetration (m)']].forEach(([col,lbl],i)=>{
+    ctx.fillStyle=col;ctx.font='10px sans-serif';ctx.textAlign='left';
+    ctx.fillText(lbl,pad.l+i*200,H-8);
+  });
+})();
+
+// ── CHART E: LOD Ablation ──
+(function(){
+  const cv=document.getElementById('chartE'), ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height, pad={t:20,b:60,l:60,r:20};
+  const pw=W-pad.l-pad.r, ph=H-pad.t-pad.b;
+
+  const labels=['Dist Only','Dist+Vis','Dist+Vis+Inter','Full 4-Factor'];
+  const solve=[0.943,1.094,0.927,1.022];
+  const lod0=[1387,2500,1924,2469];
+  const lod1=[1110,0,576,31];
+  const lod2=[3,0,0,0];
+  const pen=[0.3065,0.3169,0.3112,0.3168];
+
+  const maxV=2800;
+  function yPos(v){return pad.t+ph*(1-v/maxV);}
+  const gw=pw/labels.length, bw=gw*0.2;
+
+  [0,500,1000,1500,2000,2500].forEach(v=>{
+    let y=yPos(v);
+    ctx.strokeStyle=grid;ctx.lineWidth=0.5;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=muted;ctx.font='10px monospace';ctx.textAlign='right';ctx.fillText(v.toString(),pad.l-6,y+3);
+  });
+
+  labels.forEach((lbl,i)=>{
+    let cx=pad.l+gw*i+gw/2;
+    // LOD0
+    ctx.fillStyle=c3;
+    let y0=yPos(lod0[i]);ctx.fillRect(cx-bw*1.5,y0,bw,pad.t+ph-y0);
+    // LOD1
+    ctx.fillStyle=c4;
+    let y1=yPos(lod1[i]);ctx.fillRect(cx-bw*0.5,y1,bw,pad.t+ph-y1);
+    // LOD2
+    ctx.fillStyle=c5;
+    let y2=yPos(lod2[i]);ctx.fillRect(cx+bw*0.5,y2,bw,pad.t+ph-y2);
+
+    ctx.fillStyle=fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText(lod0[i].toString(),cx-bw,y0-4);
+    if(lod1[i]>0) ctx.fillText(lod1[i].toString(),cx,y1-4);
+
+    // Solve time annotation
+    ctx.fillStyle=c2;ctx.font='bold 9px monospace';
+    ctx.fillText(solve[i].toFixed(2)+' ms',cx,pad.t+8);
+
+    ctx.fillStyle=muted;ctx.font='10px sans-serif';ctx.textAlign='center';
+    ctx.fillText(lbl,cx,H-pad.b+14);
+    ctx.fillText('pen:'+pen[i].toFixed(3)+'m',cx,H-pad.b+26);
+  });
+
+  [[c3,'HIGH (LOD0)'],[c4,'MED (LOD1)'],[c5,'LOW (LOD2)']].forEach(([col,lbl],i)=>{
+    let lx=pad.l+i*160, ly=H-6;
+    ctx.fillStyle=col;ctx.fillRect(lx,ly-7,8,8);
+    ctx.fillStyle=muted;ctx.font='9px sans-serif';ctx.textAlign='left';ctx.fillText(lbl,lx+11,ly);
+  });
+})();
+</script>
+</body>
+</html>
