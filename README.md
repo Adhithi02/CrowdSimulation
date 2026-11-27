@@ -1,298 +1,68 @@
-# Real-Time Crowd Simulation with Density-Driven LOD
+# Interaction-Aware Adaptive GPU Crowd Simulation
 
-A research project exploring GPU-accelerated crowd simulation using Position-Based Dynamics (PBD) and a novel density-driven Level-of-Detail (LOD) system. Built in Unity, the project implements and benchmarks seven interchangeable solver backends ranging from a single-threaded Social Force baseline to a fully GPU-resident PBD solver that allocates physics fidelity based on a real-time crowd density heatmap.
+**Metro Station Digital Twin** — a Unity crowd simulation project with a native CUDA Position-Based Dynamics (PBD) backend and benchmark tools.
 
----
+The repository root contains the Unity project in `CSIM/`, native CUDA source in `NativeCUDA/`, and archived native benchmark results in `BenchmarkResults/`. Existing proposal, literature-review, and final-report LaTeX projects remain in their original folders.
 
-## Table of Contents
+## Project at a glance
 
-- [Project Overview](#project-overview)
-- [Hardware Requirements](#hardware-requirements)
-- [Software Requirements](#software-requirements)
-- [Installation](#installation)
-- [Opening the Test Scene](#opening-the-test-scene)
-- [Usage Guide](#usage-guide)
-  - [Runtime UI Controls](#runtime-ui-controls)
-  - [Solvers](#solvers)
-  - [Scene Presets](#scene-presets)
-  - [Agent & Physics Parameters](#agent--physics-parameters)
-  - [Inspector-Only Settings](#inspector-only-settings)
-- [Exporting Performance Data](#exporting-performance-data)
-- [Project Structure](#project-structure)
+- **Unity:** 2022.3.62f3 (`CSIM/ProjectSettings/ProjectVersion.txt`)
+- **Native GPU backend:** CUDA C++ plugin called from C# using P/Invoke
+- **Benchmark environment recorded in the reports:** CUDA 13.5, MSVC 19.42, NVIDIA RTX 2050 Mobile (4 GB), compute capability 8.6 (`sm_86`)
+- **Showcase population:** 300 commuters; native scalability runs include 500, 1,000, 2,500, and 5,000 agents
 
----
+## Architecture
 
-## Project Overview
+Unity owns the scene, agents, navigation, and simulation coordination. CPU solver modes provide comparison paths, while `PBDCudaSolver` marshals agent and simulation data to the native `CrowdSimulationCUDA` library. The native plugin coordinates CUDA work and exports a C ABI; `CrowdCommon.h` defines data layouts shared with the C# interop structures.
 
-The simulation models crowds of autonomous pedestrians navigating a shared environment. Each agent uses Unity's NavMesh for pathfinding and a physics solver for local collision avoidance. The core research contribution is the **PBDCompute** solver, which runs all constraint solving on the GPU via a compute shader pipeline and determines each agent's physics LOD from a live density heatmap — a dense crowd anywhere in the scene receives high-fidelity collision resolution, while sparse agents cost almost nothing regardless of their distance from the camera.
+The CUDA solver includes spatial hashing and importance-based LOD scoring using distance, visibility, interaction, and density signals. Benchmark code and archived results are kept separate from Unity assets.
 
-All seven solvers share the same agent population, NavMesh, and scene geometry, making it straightforward to compare them fairly under controlled conditions.
+## Repository layout
 
----
-
-## Hardware Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| GPU | DirectX 11 / Metal 2 capable | Dedicated GPU with ≥ 4 GB VRAM |
-| CPU | Quad-core, 2.5 GHz | 8-core, 3.5 GHz or faster |
-| RAM | 8 GB | 16 GB |
-| OS | Windows 10 64-bit / macOS 12 | Windows 11 / macOS 14 |
-
-> **Note:** The `PBDCompute` solver requires a GPU that supports compute shaders (DirectX 11 feature level 11.0 or Metal 2). The remaining CPU-side solvers run on any hardware capable of running Unity 2022.3.
-
----
-
-## Software Requirements
-
-- **Unity 2022.3.62f1** (exact version — see installation note below)
-- **Unity Jobs package** — included via the Unity Package Manager (com.unity.jobs)
-- **Burst compiler** — included via the Unity Package Manager (com.unity.burst)
-- **TextMeshPro** — included via the Unity Package Manager (com.unity.textmeshpro); required by the in-scene UI
-
----
-
-## Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone [<repository-url>](https://github.com/tjong03/Csim-prj-2026.git)
-   cd ./Csim-prj-2026
-   ```
-
-2. **Install Unity 2022.3.62f1**  
-   Open **Unity Hub**, go to *Installs → Add* and select version `2022.3.62f1`. If it does not appear in the list, download it directly from the [Unity download archive](https://unity.com/releases/editor/whats-new/2022.3.62).
-
-3. **Open the project in Unity Hub**  
-   Click *Open → Add project from disk* and select the cloned folder. Unity will import all assets and resolve packages automatically on first open — this may take several minutes.
-
-4. **Import TextMeshPro essentials**  
-   On first open Unity may display the *TMP Importer* window. Click **Import TMP Essentials**. If the window does not appear automatically, go to *Window → TextMeshPro → Import TMP Essential Resources*.
-
-5. **Verify Burst compilation**  
-   Go to *Jobs → Burst → Open Inspector* and confirm that Burst is enabled. The Jobs-based solvers (`ForceJobs`, `PBDJobs`, `PBDCLODJobs`, `PBDCLODCullingJobs`) require Burst for acceptable performance.
-
----
-
-## Opening the Test Scene
-
-The primary benchmarking scene is located at:
-
-```
-Assets/Scenes/414/Steering demo.unity
+```text
+CSIM/                         Unity project root
+  Assets/                     Scenes, scripts, prefabs, models, materials, plugins
+  Packages/                   Unity package manifest and lock file
+  ProjectSettings/            Unity editor and project settings
+NativeCUDA/                   CUDA/C++ source, native tools, and CUDA README
+BenchmarkResults/             Archived experiment CSVs and reports
+CSIM_Literature _Review/       Existing literature-review LaTeX project
+CSIM_Proposal/                Existing proposal LaTeX project
+CSIM_Report/                  Existing project-report LaTeX project
 ```
 
-Open it via *File → Open Scene* or double-click it in the Project window. Press **Play** to start the simulation. The runtime control panel appears in the top-left corner of the Game view immediately.
+Unity folders and assets were not relocated. The required native runtime library remains at `CSIM/Assets/Plugins/x86_64/CrowdSimulationCUDA.dll`.
 
----
+## Open and run in Unity
 
-## Usage Guide
+1. Install Unity **2022.3.62f3** and open the `CSIM/` directory as the Unity project (not the repository root).
+2. Let Unity resolve the dependencies in `CSIM/Packages/manifest.json`.
+3. Open `Assets/Scenes/414/Steering Demo.unity` from the Unity Project window.
+4. For the CUDA backend, use a Windows 64-bit target with a compatible NVIDIA GPU and the native plugin at the path above.
 
-### Runtime UI Controls
+The plugin importer currently enables Standalone Win64 but disables Editor, while also marking Linux64 and macOS as enabled. The DLL itself is a Windows binary. Confirm these importer settings against the intended runtime before relying on Editor Play Mode or non-Windows builds; they were not changed during this repository cleanup.
 
-All controls are accessible through the panel in the top-left corner of the Game view while the simulation is running. No pause or restart is required to switch solvers or presets — changes take effect immediately and respawn the crowd automatically.
+The project has no checked-in native CUDA build project or build script. See [`NativeCUDA/README.md`](NativeCUDA/README.md) for the source map, integration constraints, and current build limitations.
 
-```
-┌─────────────────────────┐
-│  Crowd Manager          │
-│  Solver: PBDCLODJobs    │
-│  Agents: 100            │
-├─────────────────────────┤
-│  Switch Solver:         │
-│  [Force] [F-Jobs] [PBD] │
-│  [PBD-Jobs][CLOD][Cmp]  │
-│  [Cull]                 │
-├─────────────────────────┤
-│  Scene Preset:          │
-│  [Random][Circle][Cross]│
-│  [Bi-Dir][Bottle][D-BN] │
-│  [Merge]                │
-├─────────────────────────┤
-│  ─── Common ───         │
-│  Agent Count: 50        │
-│  Speed: 5.00            │
-│  Agent Radius: 0.50     │
-│  Neighbour Dist: 4.0    │
-├─────────────────────────┤
-│  ─── PBD ───            │  (shown for PBD solvers only)
-│  Iterations: 3          │
-│  Ksi: 0.050             │
-├─────────────────────────┤
-│  ─── Force ───          │  (shown for Force solvers only)
-│  K: 1.00                │
-│  t0: 3.0                │
-├─────────────────────────┤
-│  [Respawn Crowd]        │
-└─────────────────────────┘
-```
+## Audited native benchmark results
 
----
+The Phase 3 CSVs report means in milliseconds. “CUDA total step” includes more than kernel solving; “CUDA solve” is the solve-only timing.
 
-### Solvers
+| Agents | CPU spatial hash | CUDA total step | CUDA solve |
+|---:|---:|---:|---:|
+| 500 | 5.825 | 0.509 | 0.272 |
+| 1,000 | 32.760 | 4.428 | 2.827 |
+| 2,500 | 161.945 | 7.266 | 5.690 |
+| 5,000 | 2,066.970 | 11.441 | 9.390 |
 
-Click a solver button to switch immediately. The active solver is highlighted in amber.
+These are native benchmark results, not Unity frame-time or FPS measurements. The CPU brute-force run at 5,000 agents exceeded its 10-second limit; no exact runtime is reported. The individual trials, summary CSV, and audit reports are in [`BenchmarkResults/`](BenchmarkResults/README.md).
 
-| Button | Solver | Description |
-|--------|--------|-------------|
-| `Force` | Social Force Model | Single-threaded Helbing force-based avoidance. Baseline reference. |
-| `F-Jobs` | ForceJobs | Same algorithm, parallelised with Unity Jobs + Burst. |
-| `PBD` | PBD | Single-threaded Position-Based Dynamics (Weiss 2019). |
-| `PBD-Jobs` | PBDJobs | PBD parallelised with Unity Jobs + Burst. |
-| `CLOD` | PBDCLODJobs | PBD with camera-distance LOD tiers and density-aware promotion. |
-| `PBD-Cmp` | PBDCompute | **GPU compute shader PBD with density heatmap LOD.** Primary research solver. |
-| `Cull` | PBDCLODCullingJobs | CLOD PBD with frustum culling — disables Renderer and Animator for off-screen agents. |
+## Limitations and validation status
 
-> **Switching solvers** respawns the agent population. All parameter sliders retain their values across switches.
+- Spatial hashing reduced candidate checks in the tested station workloads, but extreme dense-cluster tests exceeded bucket capacity and dropped insertions. Correctness is not claimed for arbitrary crowd densities.
+- The original `PAGP_Exp1_Scalability.csv` is retained as historical data and was not rerun after the latest NavMesh fix. It is not a post-fix Phase 3 result.
+- The archived runtime-validation report records passing managed-build and native smoke/layout checks, but marks Unity benchmark UI flows as unverified and overall Unity validation as needing sign-off. See `BenchmarkResults/Phase3_Final/runtime-validation-report.md`.
+- Native CUDA rebuild instructions are not reproducible from this repository yet: no native build configuration or build script was found. The Unity plugin DLL is preserved.
+- No `LICENSE` file is present. Select and add a license before public distribution.
 
----
-
-### Scene Presets
-
-Click a preset button to rebuild the scene geometry and respawn agents. The active preset is highlighted in teal.
-
-| Button | Preset | Description |
-|--------|--------|-------------|
-| `Random` | Random | Agents scatter across the NavMesh and navigate between the four corner goal capsules in the scene. Good general-purpose test. |
-| `Circle` | Circle | Agents spawn on a ring and each walks to the antipodal point. All paths cross the centre simultaneously — stresses collision resolution. |
-| `Crossing` | Crossing | Single block of agents walks diagonally across open ground. Tests smooth avoidance without geometry constraints. |
-| `Bi-Dir` | Bidirectional | Two equal groups walk toward each other inside a corridor. Tests counter-flow lane formation. |
-| `Bottleneck` | Bottleneck | All agents must squeeze through a single narrow gap in a wall. Maximum density stress test. |
-| `Double-BN` | DoubleBottleneck | Two bottleneck walls in sequence. Tests sustained high-density performance. |
-| `MergeLane` | MergeLane | Two lanes converge into one corridor. Tests gradual density build-up and merge behaviour. |
-
----
-
-### Agent & Physics Parameters
-
-All sliders update live without requiring a respawn.
-
-**Common (all solvers)**
-
-| Slider | Range | Default | Effect |
-|--------|-------|---------|--------|
-| Agent Count | 5 – 300 | 50 | Number of agents spawned on the next respawn. |
-| Speed | 0.5 – 15 | 5.0 | Preferred walking speed (m/s). |
-| Agent Radius | 0.1 – 2.0 | 0.5 | Collision radius of each agent (m). |
-| Neighbour Dist | 1 – 20 | 4.0 | Perception radius for main-thread grid-based solvers (m). |
-
-**PBD section** (visible when any PBD solver is active)
-
-| Slider | Range | Default | Effect |
-|--------|-------|---------|--------|
-| Iterations | 1 – 20 | 3 | Number of Jacobi constraint passes per frame. Higher values improve collision resolution quality at increased CPU/GPU cost. |
-| Ksi | 0.01 – 1.0 | 0.05 | Velocity blending rate toward preferred velocity. Lower = smoother but slower response. |
-
-**Force section** (visible when Force or F-Jobs is active)
-
-| Slider | Range | Default | Effect |
-|--------|-------|---------|--------|
-| K | 0.1 – 5.0 | 1.0 | Avoidance force magnitude scaling. |
-| t0 | 0.5 – 10.0 | 3.0 | Avoidance time horizon (s). Agents react to predicted collisions this far in the future. |
-
----
-
-### Inspector-Only Settings
-
-Some settings are not exposed in the runtime UI and must be adjusted in the Unity Inspector while the simulation is stopped (or via the Inspector in Play mode for live effect).
-
-Select the **SimulationManager** GameObject in the Hierarchy to access these:
-
-**CLOD LOD Distances** — relevant for `CLOD` and `Cull` solvers:
-- `Clod High Dist` (default 20) — agents closer than this to the focus point receive HIGH-tier physics.
-- `Clod Med Dist` (default 50) — agents between the two thresholds receive MED-tier physics.
-
-**PBDCompute density thresholds** — on the `PBDComputeSolver` component:
-- `High Density Cutoff` (default 12) — cells with more than this many agents use HIGH LOD.
-- `Med Density Cutoff` (default 4) — cells above this but below the high cutoff use MED LOD.
-
-**Benchmark Camera Protocol** — on the SimulationManager component:
-- `Enforce Benchmark Camera Protocol` — when enabled, locks the camera to a fixed overhead position every 120 frames, ensuring consistent framing across benchmark runs.
-- `Benchmark Camera Height` (default 70) — world-space height of the benchmark camera.
-- `Benchmark Pitch Degrees` (default 60°) — downward tilt of the benchmark camera.
-- `Benchmark Ortho Size` (default 32) — orthographic size if using an orthographic benchmark camera.
-
-**Debug**
-- `Draw Grid` — draws the spatial hash cells in the Scene view, coloured from green (empty) to red (dense). Useful for visualising density heatmap distribution.
-
----
-
-## Exporting Performance Data
-
-Performance metrics are collected by the `ProfilerManager` component (attached to the same GameObject as `SimulationManager`) and are also visible in Unity's built-in Profiler window.
-
-### Enabling CSV Export
-
-1. Select the **ProfilerManager** GameObject in the Hierarchy (or find the component on the SimulationManager GameObject).
-2. In the Inspector, tick **Enable Csv Logging**.
-3. Enter Play mode and run the simulation.
-4. A file named `profiler_log.csv` is written to `Application.persistentDataPath`:
-   - **Windows:** `%APPDATA%\..\LocalLow\cmput414\CSIM\`
-   - **macOS:** `~/Library/Application Support/cmput414/CSIM/`
-
-### CSV Format
-
-```
-time_unix_ms, frame, frame_ms, neighbor_ms, solver_ms, animation_ms
-```
-
-| Column | Description |
-|--------|-------------|
-| `time_unix_ms` | Wall-clock timestamp in milliseconds since Unix epoch. |
-| `frame` | Unity frame number. |
-| `frame_ms` | Rolling average duration of the full `FixedUpdate` (ms). |
-| `neighbor_ms` | Rolling average duration of the main-thread neighbour grid query (ms). Zero for GPU-side solvers. |
-| `solver_ms` | Rolling average duration of the active solver dispatch (ms). |
-| `animation_ms` | Rolling average duration of any animation sampling tagged `"Animation"` (ms). |
-
-All rolling averages use a sliding window of the last 300 frames (~5 seconds at 60 fps). The window size is configurable via the `History Size` field on `ProfilerManager`.
-
-### Inspecting Metrics at Runtime
-
-Call `ProfilerManager.Instance.GetAverageMs("Solver")` from any script, or open Unity's **Window → Analysis → Profiler** to see named samples in the CPU timeline. Every `BeginSample` / `EndSample` call also emits a Unity Profiler marker, so samples appear in the Deep Profile view with no extra instrumentation.
-
-### Recommended Benchmark Procedure
-
-1. Enable `Enforce Benchmark Camera Protocol` on `SimulationManager` to fix the camera.
-2. Enable `Enable Csv Logging` on `ProfilerManager`.
-3. Select a solver and preset, set agent count, then click **Respawn Crowd**.
-4. Wait approximately 10 seconds for the rolling averages to stabilise (300 frames at 30 fps).
-5. Note the `solver_ms` value in the CSV or Profiler, then switch solver/preset for the next run.
-6. Disable Play mode when finished; the CSV is flushed and closed automatically.
-
-### Side-by-side Solver Comparison
-
-In the Steering Demo, expand the runtime control panel and click **Compare All Solvers** or **Compare CPU vs GPU PBD**. Both run sequentially with the Circle preset, a 1-second warm-up, and a 5-second measurement window. The focused comparison pairs `PBDJobs` (CPU Jobs/Burst) with `PBDCompute` (GPU compute shader). It captures a Game view image per solver and opens an HTML report with screenshots and metrics.
-
-Reports and `metrics.csv` are saved under `Application.persistentDataPath/SolverComparisons/<comparison>-<timestamp>/`. They include FPS, script-frame and CPU solver-call timings; the GPU PBD run also records a GPU-timed `PBDCompute.GPU` marker when supported by the graphics device. `n/a` means the Unity profiler/device did not provide that GPU sample. The original solver and scene preset are restored when a run finishes. Choose a lower agent count first if the current machine struggles with the 300-agent scene.
-
----
-
-## Project Structure
-
-```
-Assets/
-├── Scenes/
-│   └── 414/
-│       └── Steering demo.unity       # Main test scene
-├── Scripts/
-│   ├── Agents/
-│   │   ├── AgentBase.cs              # Shared agent state
-│   │   ├── PBDAgent.cs               # PBD-specific agent component
-│   │   └── ForceAgent.cs             # Force-model agent component
-│   ├── Solvers/
-│   │   ├── PBDSolver.cs              # Single-threaded PBD
-│   │   ├── PBDSolverJobs.cs          # Burst-parallel PBD
-│   │   ├── CLODPBDSolverJobs.cs      # Camera-distance CLOD PBD
-│   │   ├── CLODPBDCullingSolver.cs   # Frustum-culling CLOD PBD
-│   │   ├── PBDComputeSolver.cs       # GPU compute PBD (primary solver)
-│   │   ├── ForceSolver.cs            # Single-threaded Social Force
-│   │   └── ForceSolverJobs.cs        # Burst-parallel Social Force
-│   ├── Shaders/
-│   │   └── PBDComputeShader.compute  # HLSL compute shader (7 kernels)
-│   ├── SimulationManager.cs          # Central coordinator & spawning
-│   ├── SimulationUI.cs               # Runtime control panel
-│   └── ProfilerManager.cs            # Timing, rolling stats, CSV export
-└── Prefabs/
-    ├── Agent.prefab                  # Default agent prefab
-    └── Protagonist.prefab            # Focus point for CLOD solvers
-```
+This repository organization work does not change simulation code or claim a new Unity runtime test.

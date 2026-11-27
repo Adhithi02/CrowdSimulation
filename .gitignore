@@ -1,3 +1,34 @@
+## Repository-wide generated and machine-local files
+**/.DS_Store
+**/Thumbs.db
+**/Desktop.ini
+**/.cache/
+**/.idea/
+**/.vs/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# NativeCUDA command-line executables and linker intermediates.
+# Do not ignore DLLs: the Unity plugin and native build output are retained.
+NativeCUDA/*.exe
+NativeCUDA/*.exp
+NativeCUDA/*.lib
+NativeCUDA/*.pdb
+NativeCUDA/*.obj
+
+## Unity generated data (the Unity project is nested under CSIM/)
+/CSIM/Library/
+/CSIM/Temp/
+/CSIM/Obj/
+/CSIM/obj/
+/CSIM/Build/
+/CSIM/Builds/
+/CSIM/Logs/
+/CSIM/UserSettings/
+
 ## Core latex/pdflatex auxiliary files:
 *.aux
 *.lof
