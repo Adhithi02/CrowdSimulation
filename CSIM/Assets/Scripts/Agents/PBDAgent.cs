@@ -3,6 +3,7 @@ using UnityEngine;
 public class PBDAgent : AgentBase
 {
     private int pbdIterations = 0;
+    private float _animVariation = 1f;
 
     public int PbdIterations
     {
@@ -17,6 +18,7 @@ public class PBDAgent : AgentBase
             SimulationManager.Instance?.TrySetAgentDestination(this, goal.position);
 
         _agent.speed = speed;
+        _animVariation = _anim != null ? _anim.speed : 1f;   // base Start randomised 0.8-1.2
         // PBD INTEGRATION: Stop NavMeshAgent from directly driving the Transform
         _agent.updatePosition = false;
         _agent.updateRotation = false;
@@ -67,8 +69,15 @@ public class PBDAgent : AgentBase
     {
         // In PBD, the true velocity is driven by the constraint solver.
         // We evaluate the actual current speed to drive the animator.
-        float currentSpeed = _agent.velocity.magnitude;
+        // Use the solver's velocity (the NavMeshAgent's own velocity is only a wish
+        // when updatePosition is off). Standing commuters switch to the idle clip, and
+        // the run clip is slowed to match walking pace so feet don't slide.
+        Vector3 v = velocity; v.y = 0f;
+        float currentSpeed = v.magnitude;
+        bool moving = currentSpeed > 0.3f;
+        _anim.SetBool(_runningID, moving);
         _anim.SetBool(_fastID, currentSpeed >= slowFastThreshold);
+        _anim.speed = moving ? Mathf.Clamp(currentSpeed / 2.4f, 0.45f, 1.3f) * _animVariation : 1f;
     }
 
     // -------------------------------------------------------------------------

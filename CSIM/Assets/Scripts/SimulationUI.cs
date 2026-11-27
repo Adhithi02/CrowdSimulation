@@ -1,236 +1,271 @@
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Text;
-using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 /// <summary>
-/// Metro Operations Control Center UI (OCC Digital Twin interface)
-/// Visual Theme: Dark navy & charcoal background (#0B1320 / #1C2541), cyan highlights (#00E5FF),
-/// clean typography, green/yellow/red status indicators, and dedicated PAGP Performance Lab dashboard.
-/// Split into:
-/// - Left Panel: OCC Station Controls & Telemetry
-/// - Right Panel: PAGP Scientific Suite & Concept Explorer (Non-overlapping, tabbed results & explanations)
+/// Metro OCC Digital Twin UI.
+///
+///  LEFT  (top-left)  : Operations Control Center: live status plus three tabs
+///                      (Solver &amp; Scene / Tuning / Station Ops). Locked while a
+///                      PAGP run is in progress so clicks cannot disturb measurements.
+///  RIGHT (top-right) : PAGP Performance Lab: guided demo, five experiments, and a
+///                      scrollable card with Concepts / Live Demo / Results tabs.
+///
+/// The Visual-LOD diagnostics overlay draws at the bottom centre, so nothing overlaps.
 /// </summary>
 public class SimulationUI : MonoBehaviour
 {
     [Header("Appearance")]
-    public float leftPanelWidth = 410f;
-    public float rightPanelWidth = 490f;
-    public int   fontSize       = 16;
+    public float leftPanelWidth = 400f;
+    public float rightPanelWidth = 520f;
+    public float resultsCardHeight = 470f;
+    public int fontSize = 16;
+    [Tooltip("Upper bound of the commuter slider. Each commuter is an animated 3D character, so very large counts hurt frame rate.")]
+    public int maxCommuterSlider = 1500;
 
-    // Palette: Metro OCC Digital Twin Theme
-    private static readonly Color ColorBgPanel     = new Color(0.043f, 0.075f, 0.125f, 0.94f); // #0B1320
-    private static readonly Color ColorCyanAccent  = new Color(0.0f, 0.90f, 1.0f);              // #00E5FF
+    // Palette
+    private static readonly Color ColorBgPanel     = new Color(0.043f, 0.075f, 0.125f, 0.94f);
+    private static readonly Color ColorCard        = new Color(0.06f, 0.09f, 0.14f, 0.97f);
+    private static readonly Color ColorCyanAccent  = new Color(0.0f, 0.90f, 1.0f);
     private static readonly Color ColorActiveBtn   = new Color(0.0f, 0.70f, 0.85f);
+    private static readonly Color ColorPresetOn    = new Color(0.1f, 0.75f, 0.6f);
     private static readonly Color ColorInactiveBtn = new Color(0.12f, 0.17f, 0.24f);
     private static readonly Color ColorHeaderTxt   = new Color(0.85f, 0.92f, 1.0f);
     private static readonly Color ColorSubTxt      = new Color(0.55f, 0.65f, 0.78f);
-    private static readonly Color ColorGreenStatus = new Color(0.2f, 0.95f, 0.45f);
-    private static readonly Color ColorOrangeAlert = new Color(1.0f, 0.65f, 0.15f);
-    private static readonly Color ColorRedAlarm    = new Color(1.0f, 0.25f, 0.25f);
+    private static readonly Color ColorOrange      = new Color(1.0f, 0.65f, 0.15f);
     private static readonly Color ColorTabActive   = new Color(0.08f, 0.45f, 0.58f);
-
-    private SimulationManager _mgr;
-    private Font _font;
-    private GameObject _canvasRoot;
-    private GameObject _leftControlsRoot;
-    private GameObject _rightControlsRoot;
-    private Text _toggleLeftLabel;
-    private Text _toggleRightLabel;
-
-    // OCC Status & Telemetry
-    private Text _statusLbl;
-    private Text _telemetryLbl;
-    private Text _cctvBtnLabel;
-    private Text _evacBtnLabel;
-    private Text _pauseBtnLabel;
-    private Text _visualLodBtnLabel;
-
-    // PAGP Right Panel
-    private Text _perfLabStatusLbl;
-    private Text _pagpContentLbl;
-    private Text _pagpContentHeaderLbl;
-    private Button[] _tabBtns = new Button[3];
-    private Image[]  _tabImgs = new Image[3];
-    private int _currentTab = 0; // 0 = Concepts, 1 = Results, 2 = Showcase Guide
 
     private static readonly SolverMode[] Modes =
     {
-        SolverMode.Force,       SolverMode.ForceJobs,
-        SolverMode.PBD,         SolverMode.PBDJobs,
-        SolverMode.PBDCLODJobs, SolverMode.PBDCuda,
+        SolverMode.Force, SolverMode.ForceJobs, SolverMode.PBD,
+        SolverMode.PBDJobs, SolverMode.PBDCLODJobs, SolverMode.PBDCuda,
         SolverMode.PBDCLODCullingJobs
     };
-    private static readonly string[] ModeLabels =
-        { "Force", "F-Jobs", "PBD", "PBD-Jobs", "CLOD", "CUDA (GPU)", "Cull" };
+    private static readonly string[] ModeLabels = { "Force", "Force Jobs", "PBD", "PBD Jobs", "CLOD", "CUDA (GPU)", "Cull" };
+    private static readonly string[] ModeInfo =
+    {
+        "Anticipatory social forces, 1 CPU thread.",
+        "Social forces on all CPU cores (Unity Jobs + Burst).",
+        "Position-Based Dynamics, 1 CPU thread.",
+        "PBD on all CPU cores (Unity Jobs + Burst).",
+        "PBD Jobs + camera-distance LOD tiers.",
+        "Native CUDA PBD: GPU spatial hash + 4-factor LOD.",
+        "CLOD + frustum culling of off-screen commuters."
+    };
 
     private static readonly ScenePreset[] Presets =
     {
-        ScenePreset.Random, ScenePreset.Circle,
-        ScenePreset.Crossing, ScenePreset.Bidirectional, ScenePreset.Bottleneck,
-        ScenePreset.DoubleBottleneck, ScenePreset.MergeLane
+        ScenePreset.StationFlow,
+        ScenePreset.Random, ScenePreset.Circle, ScenePreset.Crossing, ScenePreset.Bidirectional,
+        ScenePreset.Bottleneck, ScenePreset.DoubleBottleneck, ScenePreset.MergeLane
     };
-    private static readonly string[] PresetLabels =
-        { "Concourse", "Circle", "Crossing", "Platform", "Turnstiles", "Double-Gate", "Stair-Merge" };
+    private static readonly string[] PresetLabels = { "Metro Commute", "Open Concourse", "Circle", "Crossing", "Corridor", "Single Gap", "Double Gap", "Lane Merge" };
+    private static readonly string[] PresetInfo =
+    {
+        "Realistic: street → fare gates → platform → train, on a live timetable.",
+        "Test: commuters wander between open-floor goals.",
+        "Test: a ring converges on one point (dense contacts).",
+        "Test: one block walks diagonally across open floor.",
+        "Test: two counter-flows share one walled corridor.",
+        "Test: the whole crowd squeezes through one gap.",
+        "Test: two gaps in sequence.",
+        "Test: two lanes merge into one corridor."
+    };
 
-    private Button[] _solverBtns;
-    private Image[]  _solverImgs;
-    private Button[] _presetBtns;
-    private Image[]  _presetImgs;
+    private SimulationManager _mgr;
+    private PAGPPerformanceLab _lab;
+    private Font _font;
 
-    private Slider _agentSld, _speedSld, _radiusSld, _neighSld;
-    private Slider _pbdIterSld, _pbdKsiSld;
-    private Slider _forceKSld, _forceT0Sld;
+    // Left panel
+    private GameObject _leftBody;
+    private Text _leftToggleLbl, _statusLbl, _telemetryLbl, _lockLbl, _solverInfoLbl, _presetInfoLbl;
+    private CanvasGroup _leftPagesGroup;
+    private readonly GameObject[] _leftPages = new GameObject[3];
+    private readonly Image[] _leftTabImgs = new Image[3];
+    private readonly Text[] _leftTabTxts = new Text[3];
+    private Image[] _solverImgs; private Text[] _solverTxts;
+    private Image[] _presetImgs; private Text[] _presetTxts;
+    private SolverMode _shownSolver = (SolverMode)(-1);
+    private ScenePreset _shownPreset = (ScenePreset)(-1);
 
-    private Text _agentLbl, _speedLbl, _radiusLbl, _neighLbl;
-    private Text _pbdIterLbl, _pbdKsiLbl;
-    private Text _forceKLbl, _forceT0Lbl;
-
+    private Slider _agentSld, _speedSld, _radiusSld, _neighSld, _pbdIterSld, _pbdKsiSld, _forceKSld, _forceT0Sld;
+    private Text _agentLbl, _speedLbl, _radiusLbl, _neighLbl, _pbdIterLbl, _pbdKsiLbl, _forceKLbl, _forceT0Lbl;
     private GameObject _pbdSec, _forceSec;
+    private Text _evacLbl, _pauseLbl, _visualLodLbl, _gridLbl, _ringLbl, _fovLbl;
+    private FocusPointSphere _fov;
+    private FocusPointSphere Fov => _fov != null ? _fov : (_fov = FindObjectOfType<FocusPointSphere>());
+    private GameObject _captionBox;
+    private Text _captionTxt;
+    private PagpVisualizer Viz => _mgr != null ? _mgr.GetComponent<PagpVisualizer>() : null;
 
+    // Right panel
+    private GameObject _rightBody;
+    private Text _rightToggleLbl, _labStatusLbl, _cardHeaderLbl, _cardTxt;
+    private RectTransform _progressFill;
+    private Button[] _runButtons;
+    private ScrollRect _scroll;
+    private readonly Image[] _tabImgs = new Image[3];
+    private readonly Text[] _tabTxts = new Text[3];
+    private int _tab;            // 0 Concepts, 1 Live Demo, 2 Results
+    private bool _contentDirty = true;
+    private float _nextUiTick;
+
+    // ─────────────────────────────────────────────────────────────────────────
     void Start()
     {
         _mgr = SimulationManager.Instance;
         if (_mgr == null) { enabled = false; return; }
 
-        if (GetComponent<PAGPPerformanceLab>() == null)
-            gameObject.AddComponent<PAGPPerformanceLab>();
-
-        var lab = PAGPPerformanceLab.Instance;
-        if (lab != null)
+        if (PAGPPerformanceLab.Instance == null) gameObject.AddComponent<PAGPPerformanceLab>();
+        _lab = PAGPPerformanceLab.Instance;
+        if (_lab != null)
         {
-            lab.OnBenchmarkCompleted += HandleBenchmarkCompleted;
+            _lab.OnLabStateChanged += MarkDirty;
+            _lab.OnRunFinished += HandleRunFinished;
+        }
+
+        // Buttons and scrolling need an EventSystem; create one if the scene lacks it.
+        if (EventSystem.current == null && FindObjectOfType<EventSystem>() == null)
+        {
+            var es = new GameObject("EventSystem");
+            es.AddComponent<EventSystem>();
+            es.AddComponent<StandaloneInputModule>();
         }
 
         _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        BuildDualPanelInterface();
+        BuildCanvas();
     }
 
     void OnDestroy()
     {
-        var lab = PAGPPerformanceLab.Instance;
-        if (lab != null)
+        if (_lab != null)
         {
-            lab.OnBenchmarkCompleted -= HandleBenchmarkCompleted;
+            _lab.OnLabStateChanged -= MarkDirty;
+            _lab.OnRunFinished -= HandleRunFinished;
         }
     }
 
-    private void HandleBenchmarkCompleted(string title, string summary)
-    {
-        SetTab(1); // Auto-switch to Results tab
-        UpdateRightPanelContent();
-    }
+    private void MarkDirty() => _contentDirty = true;
+    private void HandleRunFinished() => SetTab(2);
 
+    // ─────────────────────────────────────────────────────────────────────────
     void Update()
     {
         if (_mgr == null) return;
 
-        float fps = 1.0f / Mathf.Max(Time.smoothDeltaTime, 1e-4f);
-        _mgr.GetFidelityCounts(out int high, out int med, out int low);
-        int total = high + med + low;
-        int savedPct = total > 0 ? (int)((float)low / total * 100f) : 0;
-
-        var metro = MetroStationManager.Instance;
-        string cctvInfo = metro != null ? metro.GetCCTVLabel() : "CCTV OFF";
-        string trainStatus = (metro != null && metro.isTrainAtPlatform) ? "<color=#00E5FF>[PLATFORM: TRAIN DOCKED]</color>" : "<color=#FFA500>[TRAIN IN TRANSIT]</color>";
-
-        // Top Status Header
-        if (_statusLbl != null)
+        // Button highlights: only when the state actually changes.
+        if (_mgr.activeSolver != _shownSolver)
         {
-            _statusLbl.text = $"<b>METRO OCC DIGITAL TWIN</b> | <color=#00E5FF>{_mgr.activeSolver}</color> ({fps:F0} FPS)\n" +
-                              $"Live Commuters: <b>{_mgr.LiveAgentCount}</b> | {trainStatus}\n" +
-                              $"Simulation LOD: High: {high} | Med: {med} | Low: {low} (<b>{savedPct}% Saved</b>)\n" +
-                              $"{cctvInfo}";
-
-            if (metro != null && metro.isEvacuationActive)
-            {
-                _statusLbl.text += $"\n<color=#FF3B30><b>[EMERGENCY EVACUATION ACTIVE]</b> Time: {metro.evacuationTimer:F1}s | Remaining: {metro.remainingEvacuees}</color>";
-            }
-
-            var visualLod = _mgr.GetComponent<PBDCudaVisualLodController>();
-            if (visualLod != null && visualLod.showDiagnostics)
-            {
-                _statusLbl.text += $"\nVisual LOD: {visualLod.VisibleCommuterCount} visible | " +
-                                   $"Near {visualLod.NearCount} | Mid {visualLod.MidCount} | " +
-                                   $"Far {visualLod.FarCount} | Hidden {visualLod.HiddenCount}";
-            }
-        }
-
-        // Live GPU / PAGP Telemetry block
-        if (_telemetryLbl != null)
-        {
-            var cuda = _mgr.GetComponent<PBDCudaSolver>();
-            if (cuda != null && cuda.IsInitialized && _mgr.activeSolver == SolverMode.PBDCuda)
-            {
-                var t = cuda.LastTimings;
-                _telemetryLbl.text = $"CUDA Total Step: <b>{t.totalMs:F2} ms</b> | Jacobi Kernel: <b>{t.solveMs:F2} ms</b>\n" +
-                                     $"Memcpy H2D: {t.h2dMs:F2} ms | D2H: {t.d2hMs:F2} ms | Spatial Grid: {t.hashAgentsMs:F2} ms";
-            }
-            else
-            {
-                float fAvg = ProfilerManager.Instance != null ? ProfilerManager.Instance.GetAverageMs("Frame") : 0f;
-                _telemetryLbl.text = $"Host Frame Avg: <b>{fAvg:F2} ms</b> | Pipeline: CPU Burst Jobs";
-            }
-        }
-
-        // Performance Lab live status
-        var lab = PAGPPerformanceLab.Instance;
-        if (lab != null && _perfLabStatusLbl != null)
-        {
-            _perfLabStatusLbl.text = lab.isRunning
-                ? $"<color=#FFA500><b>RUNNING:</b> {lab.currentBenchmarkName} ({(lab.benchmarkProgress * 100f):F0}%)</color>"
-                : $"<color=#00E5FF><b>STATUS:</b> {lab.currentBenchmarkName}</color>";
-
-            // If 60s showcase is active, keep Tab 1 or 2 up-to-date
-            if (lab.isRunning && _currentTab == 1)
-            {
-                UpdateRightPanelContent();
-            }
-        }
-
-        if (_agentSld != null) SetLbl(_agentLbl, "Commuters (Reset to apply): ", (int)_agentSld.value);
-        if (_speedSld != null) SetLbl(_speedLbl, "Walking Speed: ", _speedSld.value, "F2");
-        if (_radiusSld != null) SetLbl(_radiusLbl, "Body Radius: ", _radiusSld.value, "F2");
-        if (_neighSld != null) SetLbl(_neighLbl, "Perception Dist: ", _neighSld.value, "F1");
-        if (_pbdIterSld != null) SetLbl(_pbdIterLbl, "PBD Iterations: ", (int)_pbdIterSld.value);
-        if (_pbdKsiSld != null) SetLbl(_pbdKsiLbl, "Relaxation (Ksi): ", _pbdKsiSld.value, "F3");
-        if (_forceKSld != null) SetLbl(_forceKLbl, "Stiffness (K): ", _forceKSld.value, "F2");
-        if (_forceT0Sld != null) SetLbl(_forceT0Lbl, "Lookahead (t0): ", _forceT0Sld.value, "F1");
-
-        if (_solverImgs != null)
-        {
+            _shownSolver = _mgr.activeSolver;
             for (int i = 0; i < Modes.Length; i++)
             {
-                bool on = _mgr.activeSolver == Modes[i];
+                bool on = Modes[i] == _shownSolver;
                 _solverImgs[i].color = on ? ColorActiveBtn : ColorInactiveBtn;
-                _solverBtns[i].GetComponentInChildren<Text>().color = on ? Color.black : ColorHeaderTxt;
+                _solverTxts[i].color = on ? Color.black : ColorHeaderTxt;
+                if (on) _solverInfoLbl.text = ModeInfo[i];
             }
+            bool isPBD = _shownSolver != SolverMode.Force && _shownSolver != SolverMode.ForceJobs;
+            _pbdSec.SetActive(isPBD);
+            _forceSec.SetActive(!isPBD);
         }
-
-        if (_presetImgs != null)
+        if (_mgr.activePreset != _shownPreset)
         {
+            _shownPreset = _mgr.activePreset;
             for (int i = 0; i < Presets.Length; i++)
             {
-                bool on = _mgr.activePreset == Presets[i];
-                _presetImgs[i].color = on ? new Color(0.1f, 0.75f, 0.6f) : ColorInactiveBtn;
-                _presetBtns[i].GetComponentInChildren<Text>().color = on ? Color.black : ColorHeaderTxt;
+                bool on = Presets[i] == _shownPreset;
+                _presetImgs[i].color = on ? ColorPresetOn : ColorInactiveBtn;
+                _presetTxts[i].color = on ? Color.black : ColorHeaderTxt;
+                if (on) _presetInfoLbl.text = PresetInfo[i];
             }
         }
 
-        bool isPBD = _mgr.activeSolver != SolverMode.Force && _mgr.activeSolver != SolverMode.ForceJobs;
-        if (_pbdSec != null) _pbdSec.SetActive(isPBD);
-        if (_forceSec != null) _forceSec.SetActive(!isPBD);
+        // Everything else refreshes at ~8 Hz (string formatting + layout rebuilds are not free).
+        if (Time.unscaledTime < _nextUiTick) return;
+        _nextUiTick = Time.unscaledTime + 0.12f;
+
+        bool running = _lab != null && _lab.isRunning;
+        RefreshStatus();
+        RefreshLab(running);
+
+        _leftPagesGroup.interactable = !running;
+        _leftPagesGroup.alpha = running ? 0.55f : 1f;
+        _lockLbl.gameObject.SetActive(running);
+
+        // Live tab shows live numbers; other tabs only re-render when something changed.
+        if (_contentDirty || (_tab == 1 && running)) RefreshCard();
+
+        SetLbl(_agentLbl, $"Commuters: {(int)_agentSld.value}  (press Apply)");
+        SetLbl(_speedLbl, $"Walking speed: {_speedSld.value:F2} m/s");
+        SetLbl(_radiusLbl, $"Body radius: {_radiusSld.value:F2} m");
+        SetLbl(_neighLbl, $"Perception distance: {_neighSld.value:F1} m");
+        SetLbl(_pbdIterLbl, $"PBD iterations: {(int)_pbdIterSld.value}");
+        SetLbl(_pbdKsiLbl, $"Relaxation (ksi): {_pbdKsiSld.value:F3}");
+        SetLbl(_forceKLbl, $"Stiffness (k): {_forceKSld.value:F2}");
+        SetLbl(_forceT0Lbl, $"Look-ahead (t0): {_forceT0Sld.value:F1} s");
+        if ((int)_pbdIterSld.value != _mgr.pbdIterations)
+            _pbdIterSld.SetValueWithoutNotify(_mgr.pbdIterations);
+
+        var metro = MetroStationManager.Instance;
+        SetLbl(_evacLbl, metro != null && metro.isEvacuationActive ? "Stop Evacuation Alarm" : "Trigger Evacuation Alarm");
+        SetLbl(_pauseLbl, Time.timeScale > 0f ? "Pause" : "Resume");
+        var vl = _mgr.GetComponent<PBDCudaVisualLodController>();
+        SetLbl(_visualLodLbl, vl != null && vl.showDiagnostics ? "Hide Render LOD Stats" : "Render LOD Stats");
+        var viz = Viz;
+        SetLbl(_gridLbl, viz != null && viz.ShowHashGrid ? "Hide Heat Map" : "Hash-Grid Heat Map");
+        SetLbl(_ringLbl, viz != null && viz.ShowLodRings ? "Hide LOD Rings" : "LOD Rings");
+        SetLbl(_fovLbl, Fov != null && Fov.DisplayFoveation ? "Hide Foveated Animation" : "Foveated Animation");
+        RefreshCaption(running, viz);
     }
 
-    void BuildDualPanelInterface()
+    private void RefreshStatus()
+    {
+        float fps = 1.0f / Mathf.Max(Time.smoothDeltaTime, 1e-4f);
+        _mgr.GetFidelityCounts(out int high, out int med, out int low);
+        var metro = MetroStationManager.Instance;
+
+        var flow = _mgr.GetComponent<StationFlowController>();
+        string s = $"<b>{_mgr.activeSolver}</b>  |  <color=#00E5FF>{fps:F0} FPS</color>  |  Commuters: <b>{_mgr.LiveAgentCount}</b>\n" +
+                   $"Sim LOD  High {high} / Med {med} / Low {low}\n" +
+                   (metro != null ? $"{metro.GetCCTVLabel()}  |  {metro.ServiceStatus}" : "");
+        if (flow != null && flow.Active)
+            s += $"\nWaiting on platform {flow.WaitingCount}  |  On train {flow.OnTrainCount}  |  Boarded {flow.TotalBoarded}";
+        if (metro != null && metro.isEvacuationActive)
+            s += $"\n<color=#FF3B30><b>EVACUATION</b> {metro.evacuationTimer:F1}s, remaining {metro.remainingEvacuees}</color>";
+        _statusLbl.text = s;
+
+        var cuda = _mgr.GetComponent<PBDCudaSolver>();
+        if (cuda != null && cuda.IsInitialized && _mgr.activeSolver == SolverMode.PBDCuda)
+        {
+            var t = cuda.LastTimings;
+            _telemetryLbl.text = $"GPU step <b>{t.totalMs:F2} ms</b>  |  kernels {t.solveMs:F2}  |  hash {t.hashAgentsMs:F2}\n" +
+                                 $"PCIe host→GPU {t.h2dMs:F2} ms  |  GPU→host {t.d2hMs:F2} ms";
+        }
+        else
+        {
+            float solverMs = ProfilerManager.Instance != null ? ProfilerManager.Instance.GetAverageMs("Solver") : float.NaN;
+            _telemetryLbl.text = float.IsNaN(solverMs)
+                ? "CPU solver timing: collecting…"
+                : $"CPU solver step <b>{solverMs:F2} ms</b> (rolling average)";
+        }
+    }
+
+    private void RefreshLab(bool running)
+    {
+        if (_lab == null) return;
+        _labStatusLbl.text = running
+            ? $"<color=#FFA500><b>RUNNING</b></color>  {_lab.currentBenchmarkName}"
+            : $"<color=#00E5FF><b>READY</b></color>  {_lab.currentBenchmarkName}";
+        _progressFill.anchorMax = new Vector2(running ? Mathf.Clamp01(_lab.benchmarkProgress) : (_lab.benchmarkProgress >= 1f ? 1f : 0f), 1f);
+        for (int i = 0; i < _runButtons.Length; i++) _runButtons[i].interactable = !running;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Canvas
+    // ─────────────────────────────────────────────────────────────────────────
+    void BuildCanvas()
     {
         var cGO = new GameObject("OCC_Canvas");
-        _canvasRoot = cGO;
         cGO.transform.SetParent(transform);
         var cv = cGO.AddComponent<Canvas>();
         cv.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -241,418 +276,514 @@ public class SimulationUI : MonoBehaviour
         sc.matchWidthOrHeight = 0.5f;
         cGO.AddComponent<GraphicRaycaster>();
 
-        BuildLeftOCCPanel(cGO.transform);
-        BuildRightPAGPPanel(cGO.transform);
+        BuildLeftPanel(cGO.transform);
+        BuildRightPanel(cGO.transform);
+        BuildCaption(cGO.transform);
+        SetLeftTab(0);
+        SetTab(0);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // LEFT PANEL: METRO OPERATIONS CONTROL CENTER
-    // ─────────────────────────────────────────────────────────────────────────
-    void BuildLeftOCCPanel(Transform root)
+    // ── CAPTION: one plain sentence about what is on screen ──────────────────
+    void BuildCaption(Transform root)
     {
-        var pGO = Box(root, "OCC_LeftPanel", ColorBgPanel);
-        var pRT = pGO.GetComponent<RectTransform>();
-        pRT.anchorMin = pRT.anchorMax = pRT.pivot = new Vector2(0, 1);
-        pRT.anchoredPosition = new Vector2(12, -12);
-        pRT.sizeDelta = new Vector2(leftPanelWidth, 10);
-
-        var vl = pGO.AddComponent<VerticalLayoutGroup>();
-        vl.padding = new RectOffset(10, 10, 10, 10);
-        vl.spacing = 4;
+        _captionBox = Box(root, "Caption", new Color(0.02f, 0.05f, 0.09f, 0.82f));
+        var rt = _captionBox.GetComponent<RectTransform>();
+        rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 1f);
+        rt.anchoredPosition = new Vector2((leftPanelWidth - rightPanelWidth) * 0.5f, -12f);
+        rt.sizeDelta = new Vector2(1920f - leftPanelWidth - rightPanelWidth - 72f, 10f);
+        var vl = _captionBox.AddComponent<VerticalLayoutGroup>();
+        vl.padding = new RectOffset(14, 14, 8, 8);
         vl.childControlWidth = vl.childControlHeight = true;
-        vl.childForceExpandWidth = true;
         vl.childForceExpandHeight = false;
-        pGO.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        _captionBox.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
-        var p = pGO.transform;
+        var go = new GameObject("CaptionText", typeof(RectTransform));
+        go.transform.SetParent(_captionBox.transform, false);
+        _captionTxt = go.AddComponent<Text>();
+        _captionTxt.font = _font; _captionTxt.fontSize = fontSize; _captionTxt.color = Color.white;
+        _captionTxt.alignment = TextAnchor.MiddleCenter; _captionTxt.supportRichText = true;
+        _captionTxt.horizontalOverflow = HorizontalWrapMode.Wrap; _captionTxt.raycastTarget = false;
+        _captionBox.SetActive(false);
+    }
 
-        // Header Strip
+    void RefreshCaption(bool running, PagpVisualizer viz)
+    {
+        string text = "";
+        if (running && _lab != null && !string.IsNullOrEmpty(_lab.Caption))
+            text = (_lab.IsShowcase ? $"<color=#00E5FF><b>{_lab.PhaseIndex + 1}/5</b></color>  " : "") + _lab.Caption;
+
+        if (viz != null && viz.ShowHashGrid)
+            text += (text.Length > 0 ? "\n" : "") +
+                    $"<size={fontSize - 3}><color=#33CCFF>■</color> 1-2   <color=#33FF66>■</color> 3-5   <color=#FFCC1A>■</color> 6-9   " +
+                    $"<color=#FF4D33>■</color> 10+ commuters per {viz.CellSize:F0} m cell  ·  {viz.OccupiedCells} occupied, max {viz.MaxPerCell}</size>";
+        if (viz != null && viz.ShowLodRings)
+            text += (text.Length > 0 ? "\n" : "") +
+                    $"<size={fontSize - 3}><color=#33F266>●</color> High detail   <color=#FFBF1A>●</color> Medium   " +
+                    "<color=#4D99FF>●</color> Low (solved every 4th step)</size>";
+        if (Fov != null && Fov.DisplayFoveation)
+            text += (text.Length > 0 ? "\n" : "") +
+                    $"<size={fontSize - 3}>Foveated animation: <color=#33F266>●</color> full rate (centre of view)   " +
+                    "<color=#FF4D4D>●</color> \u2192 <color=#9A9A9A>●</color> fewer animation updates further out   no sphere = paused</size>";
+
+        bool show = text.Length > 0;
+        if (_captionBox.activeSelf != show) _captionBox.SetActive(show);
+        SetLbl(_captionTxt, text);
+    }
+
+    // ── LEFT: Operations Control Center ──────────────────────────────────────
+    void BuildLeftPanel(Transform root)
+    {
+        var p = Panel(root, "OCC_LeftPanel", new Vector2(0, 1), new Vector2(12, -12), leftPanelWidth);
+
         var header = HRow(p, 4, 30);
-        var title = Lbl(header, "OPERATIONS CONTROL CENTER", fontSize, FontStyle.Bold, ColorCyanAccent, 28);
-        title.GetComponent<LayoutElement>().flexibleWidth = 1;
-        var toggleBtn = MkBtn(header, "Collapse", fontSize - 2, ToggleLeftControls);
-        toggleBtn.GetComponent<LayoutElement>().preferredWidth = 70;
-        _toggleLeftLabel = toggleBtn.GetComponentInChildren<Text>();
+        Lbl(header, "OPERATIONS CONTROL CENTER", fontSize, FontStyle.Bold, ColorCyanAccent, 28).GetComponent<LayoutElement>().flexibleWidth = 1;
+        var tg = MkBtn(header, "Hide", fontSize - 3, () => Toggle(_leftBody, _leftToggleLbl));
+        tg.GetComponent<LayoutElement>().preferredWidth = 64;
+        _leftToggleLbl = tg.GetComponentInChildren<Text>();
 
-        _statusLbl = Lbl(p, "", fontSize - 3, FontStyle.Normal, ColorHeaderTxt, fontSize * 4.6f);
+        _leftBody = SecGO(p, "LeftBody");
+        var body = _leftBody.transform;
 
-        // Telemetry Box
-        var telBox = Box(p, "TelemetryBox", new Color(0.08f, 0.12f, 0.18f, 0.9f));
-        telBox.AddComponent<LayoutElement>().preferredHeight = 34;
-        var telL = telBox.AddComponent<VerticalLayoutGroup>();
-        telL.padding = new RectOffset(6, 6, 3, 3);
-        _telemetryLbl = Lbl(telBox.transform, "", fontSize - 3, FontStyle.Normal, ColorCyanAccent, 28);
+        _statusLbl = Lbl(body, "", fontSize - 3, FontStyle.Normal, ColorHeaderTxt, 92);
+        var tel = Box(body, "Telemetry", new Color(0.08f, 0.12f, 0.18f, 0.9f));
+        tel.AddComponent<LayoutElement>().preferredHeight = 38;
+        var telVL = tel.AddComponent<VerticalLayoutGroup>();
+        telVL.padding = new RectOffset(6, 6, 3, 3);
+        telVL.childControlWidth = telVL.childControlHeight = true;
+        _telemetryLbl = Lbl(tel.transform, "", fontSize - 3, FontStyle.Normal, ColorCyanAccent, 32);
 
-        _leftControlsRoot = SecGO(p, "ControlsContent");
-        var controls = _leftControlsRoot.transform;
+        var tabs = HRow(body, 3, 26);
+        string[] names = { "Solver & Scene", "Tuning", "Station Ops" };
+        for (int i = 0; i < 3; i++)
+        {
+            int idx = i;
+            var b = MkBtn(tabs, names[i], fontSize - 3, () => SetLeftTab(idx));
+            _leftTabImgs[i] = b.GetComponent<Image>();
+            _leftTabTxts[i] = b.GetComponentInChildren<Text>();
+        }
 
-        HSep(controls);
+        _lockLbl = Lbl(body, "<i>Locked while a PAGP run is in progress (press Stop to unlock).</i>", fontSize - 4, FontStyle.Normal, ColorOrange, 16);
+        _lockLbl.gameObject.SetActive(false);
 
-        // ── Solver Switcher ──
-        Lbl(controls, "PARALLEL ARCHITECTURE SOLVER:", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
-        var r1 = HRow(controls, 3, 24);
-        var r2 = HRow(controls, 3, 24);
-        var r3 = HRow(controls, 3, 24);
-        r3.GetComponent<HorizontalLayoutGroup>().childForceExpandWidth = false;
+        var pages = SecGO(body, "Pages");
+        _leftPagesGroup = pages.AddComponent<CanvasGroup>();
+        for (int i = 0; i < 3; i++) _leftPages[i] = SecGO(pages.transform, "Page" + i);
 
-        _solverBtns = new Button[Modes.Length];
+        BuildSolverScenePage(_leftPages[0].transform);
+        BuildTuningPage(_leftPages[1].transform);
+        BuildStationOpsPage(_leftPages[2].transform);
+    }
+
+    void BuildSolverScenePage(Transform page)
+    {
+        Lbl(page, "PARALLEL SOLVER", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
         _solverImgs = new Image[Modes.Length];
-        Transform[] btnParents = { r1, r1, r1, r2, r2, r2, r3 };
-
+        _solverTxts = new Text[Modes.Length];
+        Transform row = null;
         for (int i = 0; i < Modes.Length; i++)
         {
+            if (i % 3 == 0) row = HRow(page, 3, 26);
             int idx = i;
-            var b = MkBtn(btnParents[i], ModeLabels[i], fontSize - 3, () => _mgr.SetSolverMode(Modes[idx]));
-            if (i >= 6)
-            {
-                var le = b.gameObject.AddComponent<LayoutElement>();
-                le.preferredWidth = (leftPanelWidth - 20f) / 3f;
-            }
-            _solverBtns[i] = b;
+            var b = MkBtn(row, ModeLabels[i], fontSize - 3, () => _mgr.SetSolverMode(Modes[idx]));
             _solverImgs[i] = b.GetComponent<Image>();
+            _solverTxts[i] = b.GetComponentInChildren<Text>();
         }
+        PadRow(row, Modes.Length);
+        _solverInfoLbl = Lbl(page, "", fontSize - 4, FontStyle.Italic, ColorSubTxt, 18);
 
-        HSep(controls);
-
-        // ── Station Scenarios ──
-        Lbl(controls, "METRO SCENARIO PRESETS:", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
-        var pr1 = HRow(controls, 3, 24);
-        var pr2 = HRow(controls, 3, 24);
-        var pr3 = HRow(controls, 3, 24);
-        pr2.GetComponent<HorizontalLayoutGroup>().childForceExpandWidth = false;
-        pr3.GetComponent<HorizontalLayoutGroup>().childForceExpandWidth = false;
-
-        _presetBtns = new Button[Presets.Length];
+        HSep(page);
+        Lbl(page, "SCENARIO  (Metro Commute = realistic; others = synthetic stress tests)", fontSize - 3, FontStyle.Bold, ColorCyanAccent, 18);
         _presetImgs = new Image[Presets.Length];
-        Transform[] presetParents = { pr1, pr1, pr1, pr2, pr2, pr2, pr3 };
-
+        _presetTxts = new Text[Presets.Length];
         for (int i = 0; i < Presets.Length; i++)
         {
+            if (i % 3 == 0) row = HRow(page, 3, 26);
             int idx = i;
-            var b = MkBtn(presetParents[i], PresetLabels[i], fontSize - 3, () => _mgr.SetPreset(Presets[idx]));
-            if (i >= 3)
-            {
-                var le = b.gameObject.AddComponent<LayoutElement>();
-                le.preferredWidth = (leftPanelWidth - 20f) / 3f;
-            }
-            _presetBtns[i] = b;
+            var b = MkBtn(row, PresetLabels[i], fontSize - 3, () => _mgr.SetPreset(Presets[idx]));
             _presetImgs[i] = b.GetComponent<Image>();
+            _presetTxts[i] = b.GetComponentInChildren<Text>();
+        }
+        PadRow(row, Presets.Length);
+        _presetInfoLbl = Lbl(page, "", fontSize - 4, FontStyle.Italic, ColorSubTxt, 18);
+    }
+
+    void BuildTuningPage(Transform page)
+    {
+        Lbl(page, "CROWD", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
+        (_agentSld, _agentLbl) = MkSlider(page, Mathf.Min(_mgr.agentCount, maxCommuterSlider), 10, maxCommuterSlider, true, v => _mgr.agentCount = (int)v);
+        (_speedSld, _speedLbl) = MkSlider(page, _mgr.agentSpeed, 0.5f, 15f, false, v => _mgr.agentSpeed = v);
+        (_radiusSld, _radiusLbl) = MkSlider(page, _mgr.agentRadius, 0.1f, 2f, false, v => _mgr.agentRadius = v);
+        (_neighSld, _neighLbl) = MkSlider(page, _mgr.neighborDist, 1f, 20f, false, v => _mgr.neighborDist = v);
+
+        _pbdSec = SecGO(page, "PBDSec");
+        Lbl(_pbdSec.transform, "PBD SOLVER", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
+        (_pbdIterSld, _pbdIterLbl) = MkSlider(_pbdSec.transform, _mgr.pbdIterations, 1, 20, true, v => _mgr.pbdIterations = (int)v);
+        (_pbdKsiSld, _pbdKsiLbl) = MkSlider(_pbdSec.transform, _mgr.pbdKsi, 0.01f, 1f, false, v => _mgr.pbdKsi = v);
+
+        _forceSec = SecGO(page, "ForceSec");
+        Lbl(_forceSec.transform, "FORCE SOLVER", fontSize - 2, FontStyle.Bold, ColorOrange, 18);
+        (_forceKSld, _forceKLbl) = MkSlider(_forceSec.transform, _mgr.forceK, 0.1f, 5f, false, v => _mgr.forceK = v);
+        (_forceT0Sld, _forceT0Lbl) = MkSlider(_forceSec.transform, _mgr.forceT0, 0.5f, 10f, false, v => _mgr.forceT0 = v);
+
+        var apply = MkBtn(page, "Apply Commuter Count & Respawn", fontSize - 2, () => _mgr.Respawn());
+        apply.GetComponent<Image>().color = new Color(0.12f, 0.45f, 0.25f);
+        Lbl(page, "<i>Speed, radius and solver values apply live. The commuter count needs a respawn.</i>", fontSize - 4, FontStyle.Normal, ColorSubTxt, 30);
+    }
+
+    void BuildStationOpsPage(Transform page)
+    {
+        Lbl(page, "CAMERAS & TRANSIT", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
+        var r1 = HRow(page, 4, 28);
+        MkBtn(r1, "Next CCTV Angle", fontSize - 3, () => MetroStationManager.Instance?.CycleCCTVCamera());
+        var train = MkBtn(r1, "Cycle Train", fontSize - 3, () => MetroStationManager.Instance?.TriggerTrainCycle());
+        train.GetComponent<Image>().color = new Color(0.12f, 0.38f, 0.32f);
+
+        HSep(page);
+        Lbl(page, "EMERGENCY", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
+        var evac = MkBtn(page, "Trigger Evacuation Alarm", fontSize - 2, () => MetroStationManager.Instance?.ToggleEmergencyEvacuation());
+        evac.GetComponent<Image>().color = new Color(0.55f, 0.15f, 0.15f);
+        evac.GetComponent<LayoutElement>().preferredHeight = 28;
+        _evacLbl = evac.GetComponentInChildren<Text>();
+
+        HSep(page);
+        Lbl(page, "PAGP OVERLAYS (explain what the GPU is doing)", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
+        var ov = HRow(page, 4, 28);
+        _gridLbl = MkBtn(ov, "Hash-Grid Heat Map", fontSize - 3, () => { var v = Viz; if (v != null) v.SetHashGrid(!v.ShowHashGrid); }).GetComponentInChildren<Text>();
+        _ringLbl = MkBtn(ov, "LOD Rings", fontSize - 3, () => { var v = Viz; if (v != null) v.SetLodRings(!v.ShowLodRings); }).GetComponentInChildren<Text>();
+        Lbl(page, "CGVR OVERLAY (animation detail follows the viewer's gaze)", fontSize - 3, FontStyle.Bold, ColorCyanAccent, 18);
+        var ov2 = HRow(page, 4, 28);
+        _fovLbl = MkBtn(ov2, "Foveated Animation", fontSize - 3, () => { var f = Fov; if (f != null) f.DisplayFoveation = !f.DisplayFoveation; }).GetComponentInChildren<Text>();
+
+        HSep(page);
+        Lbl(page, "SIMULATION", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
+        var r2 = HRow(page, 4, 28);
+        _pauseLbl = MkBtn(r2, "Pause", fontSize - 3, TogglePause).GetComponentInChildren<Text>();
+        var respawn = MkBtn(r2, "Respawn Crowd", fontSize - 3, () => _mgr.Respawn());
+        respawn.GetComponent<Image>().color = new Color(0.12f, 0.45f, 0.25f);
+        var r3 = HRow(page, 4, 28);
+        _visualLodLbl = MkBtn(r3, "Render LOD Stats", fontSize - 3, ToggleVisualLodDiagnostics).GetComponentInChildren<Text>();
+        var reset = MkBtn(r3, "Reset Scene", fontSize - 3, ResetScene);
+        reset.GetComponent<Image>().color = new Color(0.16f, 0.38f, 0.30f);
+        Lbl(page, "<i>Reset: CUDA solver, Metro Commute, 300 commuters, alarm off.</i>", fontSize - 4, FontStyle.Normal, ColorSubTxt, 16);
+    }
+
+    // ── RIGHT: PAGP Performance Lab ──────────────────────────────────────────
+    void BuildRightPanel(Transform root)
+    {
+        var p = Panel(root, "PAGP_RightPanel", new Vector2(1, 1), new Vector2(-12, -12), rightPanelWidth);
+
+        var header = HRow(p, 4, 30);
+        Lbl(header, "PAGP PERFORMANCE LAB", fontSize, FontStyle.Bold, ColorCyanAccent, 28).GetComponent<LayoutElement>().flexibleWidth = 1;
+        var tg = MkBtn(header, "Hide", fontSize - 3, () => Toggle(_rightBody, _rightToggleLbl));
+        tg.GetComponent<LayoutElement>().preferredWidth = 64;
+        _rightToggleLbl = tg.GetComponentInChildren<Text>();
+
+        _rightBody = SecGO(p, "RightBody");
+        var body = _rightBody.transform;
+
+        _labStatusLbl = Lbl(body, "", fontSize - 3, FontStyle.Normal, ColorHeaderTxt, 18);
+        var bar = Box(body, "Progress", new Color(0.10f, 0.14f, 0.20f));
+        bar.AddComponent<LayoutElement>().preferredHeight = 6;
+        var fill = Box(bar.transform, "Fill", ColorCyanAccent);
+        _progressFill = fill.GetComponent<RectTransform>();
+        _progressFill.anchorMin = Vector2.zero;
+        _progressFill.anchorMax = new Vector2(0, 1);
+        _progressFill.offsetMin = _progressFill.offsetMax = Vector2.zero;
+
+        var demo = MkBtn(body, "▶  RUN GUIDED DEMO  (60 s, all 5 concepts measured live)", fontSize - 1, () =>
+        {
+            _lab?.Run60SecondShowcaseSequence();
+            SetTab(1);
+        });
+        demo.GetComponent<Image>().color = new Color(0.05f, 0.50f, 0.45f);
+        demo.GetComponent<LayoutElement>().preferredHeight = 34;
+
+        Lbl(body, "Or run one experiment as a sweep (CSV export, ~15-35 s each):", fontSize - 4, FontStyle.Normal, ColorSubTxt, 16);
+        var e1 = HRow(body, 4, 26);
+        var b1 = MkBtn(e1, "1 CPU vs CUDA", fontSize - 3, () => RunExperiment(() => _lab.RunComprehensiveSuite()));
+        var b2 = MkBtn(e1, "2 Spatial Hash", fontSize - 3, () => RunExperiment(() => _lab.RunSpatialHashAnalysis()));
+        var b3 = MkBtn(e1, "3 PBD Converge", fontSize - 3, () => RunExperiment(() => _lab.RunPBDConvergenceTest()));
+        var e2 = HRow(body, 4, 26);
+        var b4 = MkBtn(e2, "4 LOD Ablation", fontSize - 3, () => RunExperiment(() => _lab.RunLODAblationStudy()));
+        var b5 = MkBtn(e2, "5 AoS vs SoA", fontSize - 3, () => RunExperiment(() => _lab.RunMemoryLayoutBenchmark()));
+        var stop = MkBtn(e2, "■ Stop", fontSize - 3, () => _lab?.StopBenchmark());
+        stop.GetComponent<Image>().color = new Color(0.50f, 0.15f, 0.15f);
+        _runButtons = new[] { demo, b1, b2, b3, b4, b5 };
+        Color[] tints = { new Color(0.08f, 0.30f, 0.45f), new Color(0.18f, 0.28f, 0.42f), new Color(0.35f, 0.22f, 0.40f),
+                          new Color(0.12f, 0.35f, 0.28f), new Color(0.20f, 0.35f, 0.45f) };
+        for (int i = 0; i < 5; i++) _runButtons[i + 1].GetComponent<Image>().color = tints[i];
+
+        HSep(body);
+        var tabRow = HRow(body, 3, 28);
+        string[] names = { "Concepts", "Live Demo", "Results" };
+        for (int i = 0; i < 3; i++)
+        {
+            int idx = i;
+            var b = MkBtn(tabRow, names[i], fontSize - 2, () => SetTab(idx));
+            _tabImgs[i] = b.GetComponent<Image>();
+            _tabTxts[i] = b.GetComponentInChildren<Text>();
         }
 
-        HSep(controls);
+        _cardHeaderLbl = Lbl(body, "", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 22);
+        BuildScrollCard(body);
+    }
 
-        // ── Sliders ──
-        Lbl(controls, "─── SIMULATION TUNING ───", fontSize - 3, FontStyle.Normal, ColorSubTxt, 16);
-        (_agentSld,  _agentLbl)  = MkSlider(controls, "Commuters (Reset to apply): 50", _mgr.agentCount, 5, 5000, true,  v => _mgr.agentCount  = (int)v);
-        (_speedSld,  _speedLbl)  = MkSlider(controls, "Walking Speed: 5.00",   _mgr.agentSpeed, 0.5f, 15f, false, v => _mgr.agentSpeed  = v);
-        (_radiusSld, _radiusLbl) = MkSlider(controls, "Body Radius: 0.50",     _mgr.agentRadius, 0.1f, 2f,  false, v => _mgr.agentRadius = v);
-        (_neighSld,  _neighLbl)  = MkSlider(controls, "Perception Dist: 4.0",  _mgr.neighborDist, 1f, 20f, false, v => _mgr.neighborDist = v);
+    void BuildScrollCard(Transform parent)
+    {
+        var card = Box(parent, "ResultsCard", ColorCard);
+        card.AddComponent<LayoutElement>().preferredHeight = resultsCardHeight;
 
-        _pbdSec = SecGO(controls, "PBDSec");
-        Lbl(_pbdSec.transform, "─── PBD PARAMETERS ───", fontSize - 3, FontStyle.Normal, ColorCyanAccent, 16);
-        (_pbdIterSld, _pbdIterLbl) = MkSlider(_pbdSec.transform, "PBD Iterations: 3", _mgr.pbdIterations, 1, 20, true,  v => _mgr.pbdIterations = (int)v);
-        (_pbdKsiSld,  _pbdKsiLbl)  = MkSlider(_pbdSec.transform, "Relaxation: 0.050",   _mgr.pbdKsi, 0.01f, 1f, false, v => _mgr.pbdKsi = v);
+        var viewport = new GameObject("Viewport", typeof(RectTransform), typeof(RectMask2D));
+        viewport.transform.SetParent(card.transform, false);
+        var vRT = viewport.GetComponent<RectTransform>();
+        vRT.anchorMin = Vector2.zero; vRT.anchorMax = Vector2.one;
+        vRT.offsetMin = new Vector2(10, 8); vRT.offsetMax = new Vector2(-18, -8);
 
-        _forceSec = SecGO(controls, "ForceSec");
-        Lbl(_forceSec.transform, "─── FORCE PARAMETERS ───", fontSize - 3, FontStyle.Normal, ColorOrangeAlert, 16);
-        (_forceKSld,  _forceKLbl)  = MkSlider(_forceSec.transform, "Stiffness: 1.00", _mgr.forceK, 0.1f, 5f, false, v => _mgr.forceK = v);
-        (_forceT0Sld, _forceT0Lbl) = MkSlider(_forceSec.transform, "Lookahead: 3.0",  _mgr.forceT0, 0.5f, 10f, false, v => _mgr.forceT0 = v);
+        var txtGO = new GameObject("Content", typeof(RectTransform));
+        txtGO.transform.SetParent(viewport.transform, false);
+        var cRT = txtGO.GetComponent<RectTransform>();
+        cRT.anchorMin = new Vector2(0, 1); cRT.anchorMax = new Vector2(1, 1); cRT.pivot = new Vector2(0.5f, 1);
+        cRT.offsetMin = cRT.offsetMax = Vector2.zero;
+        _cardTxt = txtGO.AddComponent<Text>();
+        _cardTxt.font = _font; _cardTxt.fontSize = fontSize - 3; _cardTxt.color = ColorHeaderTxt;
+        _cardTxt.supportRichText = true; _cardTxt.alignment = TextAnchor.UpperLeft;
+        _cardTxt.horizontalOverflow = HorizontalWrapMode.Wrap;
+        _cardTxt.verticalOverflow = VerticalWrapMode.Overflow;
+        _cardTxt.lineSpacing = 1.1f;
+        _cardTxt.raycastTarget = false;
+        txtGO.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
-        HSep(controls);
+        // Slim vertical scrollbar
+        var sbGO = Box(card.transform, "Scrollbar", new Color(0.10f, 0.14f, 0.20f));
+        var sbRT = sbGO.GetComponent<RectTransform>();
+        sbRT.anchorMin = new Vector2(1, 0); sbRT.anchorMax = Vector2.one; sbRT.pivot = new Vector2(1, 0.5f);
+        sbRT.sizeDelta = new Vector2(8, -16); sbRT.anchoredPosition = new Vector2(-4, 0);
+        var area = new GameObject("Area", typeof(RectTransform));
+        area.transform.SetParent(sbGO.transform, false);
+        var aRT = area.GetComponent<RectTransform>();
+        aRT.anchorMin = Vector2.zero; aRT.anchorMax = Vector2.one; aRT.offsetMin = aRT.offsetMax = Vector2.zero;
+        var handle = Box(area.transform, "Handle", new Color(0.0f, 0.70f, 0.85f, 0.8f));
+        var hRT = handle.GetComponent<RectTransform>();
+        hRT.offsetMin = hRT.offsetMax = Vector2.zero;
+        var sb = sbGO.AddComponent<Scrollbar>();
+        sb.handleRect = hRT; sb.targetGraphic = handle.GetComponent<Image>();
+        sb.direction = Scrollbar.Direction.BottomToTop;
 
-        // ── Station Operations Controls ──
-        Lbl(controls, "TRANSIT OPERATIONS & CCTV:", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
-        var opRow = HRow(controls, 4, 26);
-        var cctvBtn = MkBtn(opRow, "CCTV Angle", fontSize - 3, () => MetroStationManager.Instance?.CycleCCTVCamera());
-        _cctvBtnLabel = cctvBtn.GetComponentInChildren<Text>();
-
-        var trainBtn = MkBtn(opRow, "Cycle Train", fontSize - 3, () => MetroStationManager.Instance?.TriggerTrainCycle());
-        trainBtn.GetComponent<Image>().color = new Color(0.12f, 0.38f, 0.32f);
-
-        var evacBtn = MkBtn(controls, "Emergency Evacuation Alarm: OFF", fontSize - 2, () => {
-            var m = MetroStationManager.Instance;
-            if (m != null)
-            {
-                m.ToggleEmergencyEvacuation();
-                _evacBtnLabel.text = m.isEvacuationActive ? "ALARM: EVACUATION ACTIVE" : "Emergency Evacuation Alarm: OFF";
-            }
-        });
-        evacBtn.GetComponent<Image>().color = new Color(0.55f, 0.15f, 0.15f);
-        _evacBtnLabel = evacBtn.GetComponentInChildren<Text>();
-
-        // ── Showcase Controls ──
-        var showcaseRow = HRow(controls, 4, 26);
-        var pauseBtn = MkBtn(showcaseRow, "Pause", fontSize - 3, TogglePause);
-        _pauseBtnLabel = pauseBtn.GetComponentInChildren<Text>();
-
-        var resetBtn = MkBtn(showcaseRow, "Reset Showcase", fontSize - 3, ResetShowcase);
-        resetBtn.GetComponent<Image>().color = new Color(0.16f, 0.38f, 0.30f);
-
-        var visualLodBtn = MkBtn(showcaseRow, "Visual LOD", fontSize - 3, ToggleVisualLodDiagnostics);
-        _visualLodBtnLabel = visualLodBtn.GetComponentInChildren<Text>();
-
-        var respawnBtn = MkBtn(controls, "Respawn Commuter Crowd", fontSize - 2, () => _mgr.Respawn());
-        respawnBtn.GetComponent<Image>().color = new Color(0.12f, 0.45f, 0.25f);
+        _scroll = card.AddComponent<ScrollRect>();
+        _scroll.viewport = vRT;
+        _scroll.content = cRT;
+        _scroll.horizontal = false;
+        _scroll.vertical = true;
+        _scroll.movementType = ScrollRect.MovementType.Clamped;
+        _scroll.scrollSensitivity = 30f;
+        _scroll.verticalScrollbar = sb;
+        _scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // RIGHT PANEL: PAGP SCIENTIFIC SUITE & CONCEPT EXPLORER
+    // Tabs & content
     // ─────────────────────────────────────────────────────────────────────────
-    void BuildRightPAGPPanel(Transform root)
+    void RunExperiment(System.Action start)
     {
-        var pGO = Box(root, "PAGP_RightPanel", ColorBgPanel);
-        var pRT = pGO.GetComponent<RectTransform>();
-        pRT.anchorMin = pRT.anchorMax = pRT.pivot = new Vector2(1, 1);
-        pRT.anchoredPosition = new Vector2(-12, -12);
-        pRT.sizeDelta = new Vector2(rightPanelWidth, 10);
+        if (_lab == null || _lab.isRunning) return;
+        start();
+        SetTab(2);
+    }
 
-        var vl = pGO.AddComponent<VerticalLayoutGroup>();
+    void SetLeftTab(int index)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            _leftPages[i].SetActive(i == index);
+            _leftTabImgs[i].color = i == index ? ColorTabActive : ColorInactiveBtn;
+            _leftTabTxts[i].color = i == index ? ColorCyanAccent : ColorHeaderTxt;
+        }
+    }
+
+    void SetTab(int index)
+    {
+        _tab = index;
+        for (int i = 0; i < 3; i++)
+        {
+            _tabImgs[i].color = i == index ? ColorTabActive : ColorInactiveBtn;
+            _tabTxts[i].color = i == index ? ColorCyanAccent : ColorHeaderTxt;
+        }
+        RefreshCard();
+        if (_scroll != null) _scroll.verticalNormalizedPosition = 1f;
+    }
+
+    void RefreshCard()
+    {
+        _contentDirty = false;
+        if (_cardTxt == null) return;
+        switch (_tab)
+        {
+            case 0: _cardHeaderLbl.text = "The five PAGP concepts in this simulator"; _cardTxt.text = ConceptsText; break;
+            case 1: _cardHeaderLbl.text = "Live guided demo"; _cardTxt.text = LiveText(); break;
+            default: _cardHeaderLbl.text = "Results: all concepts"; _cardTxt.text = ResultsText(); break;
+        }
+    }
+
+    private const string ConceptsText =
+        "<b><color=#00E5FF>1. CUDA data parallelism</color></b>\n" +
+        "One GPU thread per commuter (64 threads per block). Each physics step copies the 80-byte agent records to the GPU, runs " +
+        "Predict → Clear/Build hash → Assign LOD → Jacobi solve × iterations → Finalize, then copies them back via P/Invoke.\n" +
+        "<i>Architecture point:</i> thousands of lightweight threads hide memory latency; the fixed PCIe copy and launch cost means the " +
+        "GPU only pulls ahead once the crowd is large.\n\n" +
+
+        "<b><color=#00E5FF>2. Spatial hashing vs O(N²)</color></b>\n" +
+        "The floor is divided into 4 m cells hashed into 8,192 buckets (16 slots + overflow each). A high-detail agent only tests the 3×3 " +
+        "cells around it; medium/low agents test their own cell.\n" +
+        "<i>Why:</i> neighbour search drops from N² pair tests to roughly N × (agents nearby). <i>Limit:</i> extremely dense clusters can " +
+        "overflow a bucket.\n<color=#8FA3BF>See it: Station Ops → Hash-Grid Heat Map.</color>\n\n" +
+
+        "<b><color=#00E5FF>3. Position-Based Dynamics, Jacobi solver</color></b>\n" +
+        "Positions are predicted, then projected to satisfy non-overlap (and long-range avoidance) constraints. In Jacobi form every thread " +
+        "writes its correction to its own slot and all corrections are applied afterwards, so there are no write races. That is ideal for the GPU, " +
+        "unlike sequential Gauss-Seidel.\n" +
+        "<i>Trade-off:</i> more iterations means less residual overlap but linearly more kernel time.\n\n" +
+
+        "<b><color=#00E5FF>4. 4-factor importance-based simulation LOD</color></b>\n" +
+        "importance = 0.30·distance + 0.25·visibility (camera frustum) + 0.20·contacts + 0.25·local density.\n" +
+        "High (≥0.60): all iterations, 9-cell search, 16 contacts.  Med (≥0.30): half the iterations, 6 contacts.  " +
+        "Low: one iteration every 4th frame.\n" +
+        "<i>Why:</i> spend compute where the viewer looks and where collisions actually happen.\n<color=#8FA3BF>See it: Station Ops → LOD Rings.</color>\n\n" +
+
+        "<b><color=#00E5FF>5. GPU memory layout: AoS vs SoA</color></b>\n" +
+        "Array-of-Structures keeps each agent's fields together (80 B stride). Structure-of-Arrays stores every field contiguously, so the 32 " +
+        "threads of a warp read neighbouring addresses that coalesce into fewer 128-byte memory transactions.\n\n" +
+
+        "<b><color=#8FA3BF>CGVR side (presentation only)</color></b>\n" +
+        "<color=#8FA3BF>A separate visual LOD throttles animators by distance (near: every frame, mid: 10 Hz, far: 3 Hz) and hides off-screen " +
+        "commuters. It never changes the physics. The station itself (fare gates, sliding platform doors, train timetable, signage, " +
+        "smooth CCTV camera glides) is the digital-twin presentation layer.</color>";
+
+    string LiveText()
+    {
+        if (_lab == null) return "Performance lab unavailable.";
+        var sb = new System.Text.StringBuilder();
+        int phase = _lab.PhaseIndex;
+
+        if (phase < 0 && !_lab.isRunning)
+        {
+            sb.AppendLine("Press <b>▶ RUN GUIDED DEMO</b>. One continuous rush-hour commute plays for 60 seconds while the camera visits " +
+                          "five views, one per concept. Each concept is measured live on the GPU, and at the end the Results tab opens with every result.\n");
+            sb.AppendLine("While it runs, the station controls are locked so nothing disturbs the measurements. Pause freezes the demo; Stop ends it.\n");
+        }
+
+        sb.AppendLine("<b>Timeline</b>");
+        for (int i = 0; i < PAGPPerformanceLab.PhaseNames.Length; i++)
+        {
+            string mark = phase > i ? "<color=#33F273>✓</color>" : phase == i ? "<color=#FFA500>▶</color>" : "<color=#8FA3BF>○</color>";
+            sb.AppendLine($"  {mark}  {i * 12:00}-{(i + 1) * 12:00} s   {PAGPPerformanceLab.PhaseNames[i]}");
+        }
+
+        if (phase >= 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"<b><color=#00E5FF>{_lab.PhaseTitle}</color></b>");
+            sb.AppendLine(_lab.PhaseBody);
+            sb.AppendLine($"\n<color=#FFA500>{_lab.PhaseStatus}</color>");
+
+            if (_lab.isRunning)
+            {
+                _mgr.GetFidelityCounts(out int h, out int m, out int l);
+                var cuda = _mgr.GetComponent<PBDCudaSolver>();
+                string gpu = cuda != null && cuda.IsInitialized ? $"{cuda.LastTimings.totalMs:F2} ms" : "n/a";
+                sb.AppendLine($"\n<b>Live:</b> {_mgr.LiveAgentCount} commuters | GPU step {gpu} | LOD H/M/L {h}/{m}/{l} | " +
+                              $"{_mgr.pbdIterations} iterations | {1f / Mathf.Max(Time.smoothDeltaTime, 1e-4f):F0} FPS");
+            }
+
+            if (phase < PAGPPerformanceLab.ConceptCount && _lab.ConceptResults[phase] != null)
+                sb.AppendLine($"\n<b>Result captured:</b>\n{_lab.ConceptResults[phase]}");
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    string ResultsText()
+    {
+        if (_lab == null) return "Performance lab unavailable.";
+        var sb = new System.Text.StringBuilder();
+        if (_lab.isRunning)
+            sb.AppendLine($"<color=#FFA500>Running: {_lab.currentBenchmarkName} ({_lab.benchmarkProgress * 100f:F0}%)</color>\n");
+
+        for (int i = 0; i < PAGPPerformanceLab.ConceptCount; i++)
+        {
+            sb.AppendLine($"<b><color=#00E5FF>{i + 1}. {PAGPPerformanceLab.ConceptNames[i]}</color></b>");
+            sb.AppendLine(_lab.ConceptResults[i] ??
+                          $"<color=#8FA3BF>Not measured yet. Run the guided demo or experiment {i + 1}.</color>");
+            sb.AppendLine();
+        }
+        sb.Append("<color=#8FA3BF>CSV files: Application.persistentDataPath (and Desktop/pagp/BenchmarkResults if present).</color>");
+        return sb.ToString();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Actions
+    // ─────────────────────────────────────────────────────────────────────────
+    void Toggle(GameObject body, Text label)
+    {
+        bool show = !body.activeSelf;
+        body.SetActive(show);
+        label.text = show ? "Hide" : "Show";
+    }
+
+    void TogglePause() => Time.timeScale = Time.timeScale > 0f ? 0f : 1f;
+
+    void ResetScene()
+    {
+        _lab?.StopBenchmark();
+        Time.timeScale = 1f;
+        var metro = MetroStationManager.Instance;
+        if (metro != null && metro.isEvacuationActive) metro.ToggleEmergencyEvacuation();
+        _mgr.Configure(SolverMode.PBDCuda, ScenePreset.StationFlow, 300);
+        Viz?.SetHashGrid(false);
+        Viz?.SetLodRings(false);
+        _agentSld.SetValueWithoutNotify(300);
+        metro?.ApplyCCTVAngle(MetroStationManager.CCTVAngle.CCTV_Concourse);
+    }
+
+    void ToggleVisualLodDiagnostics()
+    {
+        var vl = _mgr.GetComponent<PBDCudaVisualLodController>();
+        if (vl != null) vl.ToggleDiagnostics();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Widget helpers
+    // ─────────────────────────────────────────────────────────────────────────
+    Transform Panel(Transform root, string name, Vector2 corner, Vector2 offset, float width)
+    {
+        var go = Box(root, name, ColorBgPanel);
+        var rt = go.GetComponent<RectTransform>();
+        rt.anchorMin = rt.anchorMax = rt.pivot = corner;
+        rt.anchoredPosition = offset;
+        rt.sizeDelta = new Vector2(width, 10);
+        var vl = go.AddComponent<VerticalLayoutGroup>();
         vl.padding = new RectOffset(10, 10, 10, 10);
         vl.spacing = 5;
         vl.childControlWidth = vl.childControlHeight = true;
         vl.childForceExpandWidth = true;
         vl.childForceExpandHeight = false;
-        pGO.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-        var p = pGO.transform;
-
-        // Header Strip
-        var header = HRow(p, 4, 30);
-        var title = Lbl(header, "PAGP SCIENTIFIC SUITE & LAB", fontSize, FontStyle.Bold, ColorCyanAccent, 28);
-        title.GetComponent<LayoutElement>().flexibleWidth = 1;
-        var toggleBtn = MkBtn(header, "Collapse", fontSize - 2, ToggleRightControls);
-        toggleBtn.GetComponent<LayoutElement>().preferredWidth = 70;
-        _toggleRightLabel = toggleBtn.GetComponentInChildren<Text>();
-
-        _rightControlsRoot = SecGO(p, "PAGPContent");
-        var controls = _rightControlsRoot.transform;
-
-        // Big Primary Showcase Demonstration Button
-        var demoBtn = MkBtn(controls, "▶ RUN 60s DEMO SHOWCASE (ALL CONCEPTS)", fontSize, () => {
-            PAGPPerformanceLab.Instance?.Run60SecondShowcaseSequence();
-            SetTab(2); // Switch to Showcase Guide tab
-        });
-        demoBtn.GetComponent<Image>().color = new Color(0.05f, 0.50f, 0.45f);
-        demoBtn.GetComponent<LayoutElement>().preferredHeight = 32;
-
-        HSep(controls);
-
-        // Lab Benchmark Buttons
-        Lbl(controls, "INDIVIDUAL SCIENTIFIC EXPERIMENTS:", fontSize - 2, FontStyle.Bold, ColorCyanAccent, 18);
-        _perfLabStatusLbl = Lbl(controls, "STATUS: Ready", fontSize - 3, FontStyle.Normal, ColorSubTxt, 18);
-
-        var labRow1 = HRow(controls, 4, 26);
-        var bSuite = MkBtn(labRow1, "1: CPU vs CUDA", fontSize - 3, () => {
-            PAGPPerformanceLab.Instance?.RunComprehensiveSuite();
-            SetTab(1);
-        });
-        bSuite.GetComponent<Image>().color = new Color(0.08f, 0.30f, 0.45f);
-
-        var bHash = MkBtn(labRow1, "2: Spatial Hash vs O(N²)", fontSize - 3, () => {
-            PAGPPerformanceLab.Instance?.RunSpatialHashAnalysis();
-            SetTab(1);
-        });
-        bHash.GetComponent<Image>().color = new Color(0.18f, 0.28f, 0.42f);
-
-        var labRow2 = HRow(controls, 4, 26);
-        var bAbl = MkBtn(labRow2, "3: LOD Ablation", fontSize - 3, () => {
-            PAGPPerformanceLab.Instance?.RunLODAblationStudy();
-            SetTab(1);
-        });
-        bAbl.GetComponent<Image>().color = new Color(0.12f, 0.35f, 0.28f);
-
-        var bConv = MkBtn(labRow2, "4: PBD Convergence", fontSize - 3, () => {
-            PAGPPerformanceLab.Instance?.RunPBDConvergenceTest();
-            SetTab(1);
-        });
-        bConv.GetComponent<Image>().color = new Color(0.35f, 0.22f, 0.40f);
-
-        var labRow3 = HRow(controls, 4, 26);
-        var bMem = MkBtn(labRow3, "5: AoS vs SoA Memory", fontSize - 3, () => {
-            PAGPPerformanceLab.Instance?.RunMemoryLayoutBenchmark();
-            SetTab(1);
-        });
-        bMem.GetComponent<Image>().color = new Color(0.20f, 0.35f, 0.45f);
-
-        var bStop = MkBtn(labRow3, "Stop Test", fontSize - 3, () => PAGPPerformanceLab.Instance?.StopBenchmark());
-        bStop.GetComponent<Image>().color = new Color(0.50f, 0.15f, 0.15f);
-
-        HSep(controls);
-
-        // Tab Navigation Bar
-        var tabRow = HRow(controls, 3, 26);
-        string[] tabNames = { "1. Concepts & Theory", "2. Benchmark Results", "3. 60s Demo Guide" };
-        for (int i = 0; i < 3; i++)
-        {
-            int tabIndex = i;
-            var tabBtn = MkBtn(tabRow, tabNames[i], fontSize - 3, () => SetTab(tabIndex));
-            _tabBtns[i] = tabBtn;
-            _tabImgs[i] = tabBtn.GetComponent<Image>();
-        }
-
-        // Tab Content Display Card
-        var cardGO = Box(controls, "ResultsDisplayCard", new Color(0.06f, 0.09f, 0.14f, 0.96f));
-        var cardRT = cardGO.GetComponent<RectTransform>();
-        cardRT.sizeDelta = new Vector2(rightPanelWidth - 20f, 330f);
-        cardGO.AddComponent<LayoutElement>().preferredHeight = 330;
-
-        var cardVL = cardGO.AddComponent<VerticalLayoutGroup>();
-        cardVL.padding = new RectOffset(10, 10, 8, 8);
-        cardVL.spacing = 4;
-        cardVL.childControlWidth = true;
-        cardVL.childControlHeight = true;
-        cardVL.childForceExpandWidth = true;
-        cardVL.childForceExpandHeight = false;
-
-        _pagpContentHeaderLbl = Lbl(cardGO.transform, "Concepts & Architecture", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 20);
-        _pagpContentLbl = Lbl(cardGO.transform, "", fontSize - 3, FontStyle.Normal, ColorHeaderTxt, 290);
-        _pagpContentLbl.alignment = TextAnchor.UpperLeft;
-        _pagpContentLbl.horizontalOverflow = HorizontalWrapMode.Wrap;
-        _pagpContentLbl.verticalOverflow = VerticalWrapMode.Truncate;
-
-        SetTab(0); // Initialize with Concepts Tab
-    }
-
-    private void SetTab(int tabIndex)
-    {
-        _currentTab = tabIndex;
-        for (int i = 0; i < 3; i++)
-        {
-            if (_tabImgs[i] != null)
-                _tabImgs[i].color = (i == tabIndex) ? ColorTabActive : ColorInactiveBtn;
-            if (_tabBtns[i] != null)
-                _tabBtns[i].GetComponentInChildren<Text>().color = (i == tabIndex) ? ColorCyanAccent : ColorHeaderTxt;
-        }
-        UpdateRightPanelContent();
-    }
-
-    private void UpdateRightPanelContent()
-    {
-        if (_pagpContentLbl == null || _pagpContentHeaderLbl == null) return;
-
-        var lab = PAGPPerformanceLab.Instance;
-
-        switch (_currentTab)
-        {
-            case 0:
-                // Concepts & Theory
-                _pagpContentHeaderLbl.text = "PAGP CORE CONCEPTS & GPU ARCHITECTURE";
-                _pagpContentLbl.text =
-                    "<b>1. Massive CUDA GPU Parallelism:</b>\n" +
-                    "• 128 threads/block with coalesced memory operations for position updates.\n" +
-                    "• Overcomes host CPU core limits; scales effortlessly up to 5,000 commuters (>60 FPS).\n\n" +
-                    "<b>2. Spatial Hashing Uniform Grid vs O(N²):</b>\n" +
-                    "• Discretizes continuous station into uniform 3D hash cells matching interaction radius.\n" +
-                    "• Reduces collision candidate checks from 12.5M pairs to localized stencils (>99.7% eliminated).\n\n" +
-                    "<b>3. Continuous 4-Factor Dynamic Simulation LOD:</b>\n" +
-                    "• Modulates solver fidelity by Distance + Frustum Visibility + Interaction + Density.\n" +
-                    "• Yields 35%+ reduction in total compute workload while preserving physical behavior.\n\n" +
-                    "<b>4. Position-Based Dynamics (PBD) Jacobi Solver:</b>\n" +
-                    "• Direct geometric position projection avoids stiff differential equation instabilities.\n" +
-                    "• Parallel Jacobi iteration converges rapidly within 3-4 steps with zero interpenetration.\n\n" +
-                    "<b>5. Coalesced Memory Layout (Structure of Arrays - SoA):</b>\n" +
-                    "• Continuous contiguous float arrays (X, Y, Z) maximize 128-byte cache line saturation.";
-                break;
-
-            case 1:
-                // Benchmark Results
-                if (lab != null)
-                {
-                    _pagpContentHeaderLbl.text = lab.LatestResultTitle;
-                    _pagpContentLbl.text = lab.LatestResultSummary;
-                }
-                else
-                {
-                    _pagpContentHeaderLbl.text = "Benchmark Results";
-                    _pagpContentLbl.text = "PAGP Performance Lab is idle. Run an experiment or the 60s showcase.";
-                }
-                break;
-
-            case 2:
-                // 60s Showcase Guide
-                _pagpContentHeaderLbl.text = "60-SECOND DIGITAL TWIN SHOWCASE GUIDE";
-                _pagpContentLbl.text =
-                    "<b>[Phase 1 | 00-12s] Concourse & GPU Spatial Hash:</b>\n" +
-                    "• 2,500 active commuters circulating across the primary concourse.\n" +
-                    "• Demonstrates uniform grid cell mapping and O(N) neighbor search pruning.\n\n" +
-                    "<b>[Phase 2 | 12-24s] Platform Dynamics & Train Docking:</b>\n" +
-                    "• CCTV switches to platform. Train carriage arrives and passenger boarding initiates.\n" +
-                    "• Demonstrates yellow-line boundary constraints and P/Invoke DLL state synchronization.\n\n" +
-                    "<b>[Phase 3 | 24-36s] Turnstile Gates & Bottleneck Resolution:</b>\n" +
-                    "• Fare gate turnstile constriction demonstrates high-density crowding.\n" +
-                    "• Demonstrates PBD Jacobi collision constraint relaxation with zero jittering.\n\n" +
-                    "<b>[Phase 4 | 36-48s] 4-Factor Dynamic Simulation LOD:</b>\n" +
-                    "• Observer eye-level perspective illustrates adaptive continuous fidelity.\n\n" +
-                    "<b>[Phase 5 | 48-60s] Emergency Evacuation & Scalability:</b>\n" +
-                    "• Emergency fire alarm triggers flashing strobe lighting; commuters re-route to exits.";
-                break;
-        }
-    }
-
-    void ToggleLeftControls()
-    {
-        bool show = !_leftControlsRoot.activeSelf;
-        _leftControlsRoot.SetActive(show);
-        _toggleLeftLabel.text = show ? "Collapse" : "Expand";
-    }
-
-    void ToggleRightControls()
-    {
-        bool show = !_rightControlsRoot.activeSelf;
-        _rightControlsRoot.SetActive(show);
-        _toggleRightLabel.text = show ? "Collapse" : "Expand";
-    }
-
-    void TogglePause()
-    {
-        bool paused = Time.timeScale > 0f;
-        Time.timeScale = paused ? 0f : 1f;
-        if (_pauseBtnLabel != null)
-            _pauseBtnLabel.text = paused ? "Resume" : "Pause";
-    }
-
-    void ResetShowcase()
-    {
-        Time.timeScale = 1f;
-        if (_pauseBtnLabel != null) _pauseBtnLabel.text = "Pause";
-
-        var metro = MetroStationManager.Instance;
-        if (metro != null && metro.isEvacuationActive)
-        {
-            metro.ToggleEmergencyEvacuation();
-            return;
-        }
-
-        _mgr?.Respawn();
-    }
-
-    void ToggleVisualLodDiagnostics()
-    {
-        var visualLod = _mgr != null ? _mgr.GetComponent<PBDCudaVisualLodController>() : null;
-        if (visualLod == null) return;
-
-        visualLod.ToggleDiagnostics();
-        if (_visualLodBtnLabel != null)
-            _visualLodBtnLabel.text = visualLod.showDiagnostics ? "Hide Visual LOD" : "Show Visual LOD";
+        go.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        return go.transform;
     }
 
     GameObject SecGO(Transform parent, string name)
     {
-        var go = new GameObject(name);
+        var go = new GameObject(name, typeof(RectTransform));
         go.transform.SetParent(parent, false);
         var vl = go.AddComponent<VerticalLayoutGroup>();
-        vl.spacing = 3;
+        vl.spacing = 4;
         vl.childControlWidth = vl.childControlHeight = true;
         vl.childForceExpandWidth = true;
         vl.childForceExpandHeight = false;
-        go.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
         return go;
     }
 
-    // ── Helper Constructors ──
     GameObject Box(Transform parent, string name, Color col)
     {
-        var go = new GameObject(name);
+        var go = new GameObject(name, typeof(RectTransform));
         go.transform.SetParent(parent, false);
         go.AddComponent<Image>().color = col;
         return go;
@@ -660,25 +791,25 @@ public class SimulationUI : MonoBehaviour
 
     Text Lbl(Transform parent, string txt, int sz, FontStyle fs, Color col, float h)
     {
-        var go = new GameObject("L");
+        var go = new GameObject("L", typeof(RectTransform));
         go.transform.SetParent(parent, false);
         var t = go.AddComponent<Text>();
         t.font = _font; t.text = txt; t.fontSize = sz;
         t.fontStyle = fs; t.color = col; t.supportRichText = true;
+        t.raycastTarget = false;
         go.AddComponent<LayoutElement>().preferredHeight = h;
         return t;
     }
 
     void HSep(Transform parent)
     {
-        var go = Box(parent, "Sep", new Color(0.15f, 0.22f, 0.32f));
-        var le = go.AddComponent<LayoutElement>();
+        var le = Box(parent, "Sep", new Color(0.15f, 0.22f, 0.32f)).AddComponent<LayoutElement>();
         le.preferredHeight = le.minHeight = 1;
     }
 
     Transform HRow(Transform parent, float spacing, float height)
     {
-        var go = new GameObject("HRow");
+        var go = new GameObject("Row", typeof(RectTransform));
         go.transform.SetParent(parent, false);
         var hl = go.AddComponent<HorizontalLayoutGroup>();
         hl.spacing = spacing;
@@ -689,18 +820,27 @@ public class SimulationUI : MonoBehaviour
         return go.transform;
     }
 
+    /// <summary>Fill the last row of a 3-column grid with invisible spacers so buttons keep equal width.</summary>
+    void PadRow(Transform row, int count)
+    {
+        for (int i = count % 3; i != 0 && i < 3; i++)
+            new GameObject("Spacer", typeof(RectTransform), typeof(LayoutElement)).transform.SetParent(row, false);
+    }
+
     Button MkBtn(Transform parent, string label, int sz, UnityEngine.Events.UnityAction cb)
     {
         var go = Box(parent, "Btn", ColorInactiveBtn);
-        var le = go.AddComponent<LayoutElement>();
-        le.preferredHeight = 26;
+        go.AddComponent<LayoutElement>().preferredHeight = 26;
         var btn = go.AddComponent<Button>();
         btn.onClick.AddListener(cb);
         btn.targetGraphic = go.GetComponent<Image>();
+        var colors = btn.colors;
+        colors.disabledColor = new Color(0.5f, 0.5f, 0.5f, 0.45f);
+        btn.colors = colors;
 
-        var lgo = new GameObject("L");
+        var lgo = new GameObject("L", typeof(RectTransform));
         lgo.transform.SetParent(go.transform, false);
-        var lrt = lgo.AddComponent<RectTransform>();
+        var lrt = lgo.GetComponent<RectTransform>();
         lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
         lrt.offsetMin = lrt.offsetMax = Vector2.zero;
         var t = lgo.AddComponent<Text>();
@@ -709,54 +849,54 @@ public class SimulationUI : MonoBehaviour
         t.alignment = TextAnchor.MiddleCenter;
         t.color = ColorHeaderTxt;
         t.supportRichText = true;
+        t.raycastTarget = false;
         return btn;
     }
 
-    (Slider, Text) MkSlider(Transform parent, string labelTxt, float init, float min, float max, bool whole, UnityEngine.Events.UnityAction<float> cb)
+    (Slider, Text) MkSlider(Transform parent, float init, float min, float max, bool whole, UnityEngine.Events.UnityAction<float> cb)
     {
-        var lbl = Lbl(parent, labelTxt, fontSize - 3, FontStyle.Normal, ColorHeaderTxt, fontSize);
+        var lbl = Lbl(parent, "", fontSize - 3, FontStyle.Normal, ColorHeaderTxt, fontSize);
 
-        var sGO = new GameObject("SLD");
+        var sGO = new GameObject("Slider", typeof(RectTransform));
         sGO.transform.SetParent(parent, false);
-        sGO.AddComponent<LayoutElement>().preferredHeight = 15;
+        sGO.AddComponent<LayoutElement>().preferredHeight = 16;
 
         var bg = Box(sGO.transform, "Bg", new Color(0.10f, 0.14f, 0.20f));
         var bgRT = bg.GetComponent<RectTransform>();
         bgRT.anchorMin = new Vector2(0, 0.25f); bgRT.anchorMax = new Vector2(1, 0.75f);
         bgRT.offsetMin = bgRT.offsetMax = Vector2.zero;
 
-        var fa = new GameObject("FA");
+        var fa = new GameObject("FillArea", typeof(RectTransform));
         fa.transform.SetParent(sGO.transform, false);
-        var faRT = fa.AddComponent<RectTransform>();
+        var faRT = fa.GetComponent<RectTransform>();
         faRT.anchorMin = new Vector2(0, 0.25f); faRT.anchorMax = new Vector2(1, 0.75f);
-        faRT.offsetMin = new Vector2(4, 0);   faRT.offsetMax = new Vector2(-12, 0);
-        var fill = Box(fa.transform, "F", ColorCyanAccent);
-        var fillRT = fill.GetComponent<RectTransform>();
+        faRT.offsetMin = new Vector2(4, 0); faRT.offsetMax = new Vector2(-12, 0);
+        var fillRT = Box(fa.transform, "Fill", ColorCyanAccent).GetComponent<RectTransform>();
         fillRT.anchorMin = Vector2.zero; fillRT.anchorMax = Vector2.one;
         fillRT.offsetMin = fillRT.offsetMax = Vector2.zero;
 
-        var ha = new GameObject("HA");
+        var ha = new GameObject("HandleArea", typeof(RectTransform));
         ha.transform.SetParent(sGO.transform, false);
-        var haRT = ha.AddComponent<RectTransform>();
+        var haRT = ha.GetComponent<RectTransform>();
         haRT.anchorMin = Vector2.zero; haRT.anchorMax = Vector2.one;
         haRT.offsetMin = new Vector2(8, 0); haRT.offsetMax = new Vector2(-8, 0);
-        var hnd = Box(ha.transform, "H", Color.white);
+        var hnd = Box(ha.transform, "Handle", Color.white);
         var hndRT = hnd.GetComponent<RectTransform>();
         hndRT.anchorMin = Vector2.zero; hndRT.anchorMax = new Vector2(0, 1);
-        hndRT.sizeDelta = new Vector2(10, 0);
         hndRT.offsetMin = new Vector2(-5, 0); hndRT.offsetMax = new Vector2(5, 0);
 
         var sld = sGO.AddComponent<Slider>();
-        sld.fillRect = fillRT; sld.handleRect = hndRT;
+        sld.fillRect = fillRT; sld.handleRect = hndRT; sld.targetGraphic = hnd.GetComponent<Image>();
         sld.direction = Slider.Direction.LeftToRight;
         sld.minValue = min; sld.maxValue = max;
         sld.wholeNumbers = whole;
         sld.value = Mathf.Clamp(init, min, max);
         sld.onValueChanged.AddListener(cb);
-
         return (sld, lbl);
     }
 
-    static void SetLbl(Text t, string prefix, int v) => t.text = prefix + v;
-    static void SetLbl(Text t, string prefix, float v, string fmt) => t.text = prefix + v.ToString(fmt);
+    static void SetLbl(Text t, string value)
+    {
+        if (t != null && t.text != value) t.text = value;
+    }
 }

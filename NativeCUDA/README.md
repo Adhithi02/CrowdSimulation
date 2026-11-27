@@ -1,6 +1,6 @@
 # Native CUDA backend
 
-This directory contains the CUDA implementation, native benchmark programs, and helper scripts. The source files are intentionally kept together: the CUDA and C++ sources include `CrowdCommon.h` by its local filename, and the repository does not contain a build project or build script that defines alternate include paths.
+This directory contains the CUDA implementation, native benchmark programs, and helper scripts. The source files are intentionally kept together: the CUDA and C++ sources include `CrowdCommon.h` by its local filename, and `build.bat` compiles them from this folder.
 
 ## Source map
 
@@ -22,11 +22,24 @@ CSIM/Assets/Plugins/x86_64/CrowdSimulationCUDA.dll
 
 Do not move or rename that plugin, alter the exported function names, or change the shared struct layouts without a separately validated integration change. The plugin metadata enables the Win64 target. The `.dll` is a Windows binary; do not assume that the same binary runs on macOS or Linux.
 
-## Build status and requirements
+## Building
 
-The project metadata and benchmark reports identify CUDA Toolkit 13.5, MSVC 19.42, and NVIDIA compute capability 8.6 (`sm_86`). The checked-in source includes CUDA runtime headers and CUDA kernel code. No `CMakeLists.txt`, Visual Studio native project, Makefile, or reproducible native build script was found, so this repository does not currently document a verified command for rebuilding the DLL. Existing `.exe`, `.lib`, and `.exp` files are local build outputs, not build instructions.
+Requirements: CUDA Toolkit (tested 13.5), Visual Studio C++ build tools (tested VS 18 / MSVC v145),
+and an NVIDIA GPU (tested RTX 2050 Laptop, `sm_86`). From this folder, in any terminal:
 
-The Unity plugin DLL is deliberately not ignored. A separate copy of the DLL in this directory is retained; the Unity runtime copy remains in `CSIM/Assets/Plugins/x86_64/`.
+```bat
+build.bat            :: builds build\CrowdSimulationCUDA.dll and build\run_phase3.exe
+build.bat bench      :: builds, then runs the Phase 3 benchmarks (about 25 s)
+build.bat install    :: builds, then copies the DLL into CSIM\Assets\Plugins\x86_64 (close Unity first)
+```
+
+The script finds MSVC through `vswhere` automatically. For another GPU, set the architecture
+first, e.g. `set CUDA_ARCH=sm_75`. Outputs go to `build\` (git-ignored); the Unity plugin in
+`CSIM/Assets/Plugins/x86_64/` is only replaced by `build.bat install`.
+
+The Phase 3 harness runs experiments A–E plus **E2**, a LOD ablation with a real camera frustum
+and the runtime's every-4th-step Low cadence, measured against a no-LOD (all High) baseline.
+Results of the 2026-11-27 run are archived in `BenchmarkResults/Phase3_Rerun_2026-11-27/`.
 
 ## Benchmark output paths
 

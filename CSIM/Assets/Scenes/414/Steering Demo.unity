@@ -1781,9 +1781,9 @@ MonoBehaviour:
   agentCount: 300
   spawnWidth: 20
   spawnDepth: 20
-  activePreset: 4
+  activePreset: 7
   activeSolver: 7
-  agentSpeed: 5
+  agentSpeed: 1.4
   agentRadius: 0.5
   neighborDist: 4
   agentMass: 1
@@ -2300,7 +2300,7 @@ MonoBehaviour:
   animationsResetTime: 0.2
   cappedHz: 100
   debuggingMessages: 0
-  displayFoveationLevels: 1
+  displayFoveationLevels: 0
   displayHz: 0
   sphere: {fileID: 0}
   sphereMaterial: {fileID: 0}

@@ -600,16 +600,18 @@ void ExperimentD(FILE* fTrials, FILE* fStats) {
 // ═══════════════════════════════════════════════════════════════════════════════
 void ExperimentE(FILE* fTrials, FILE* fStats) {
     printf("\n==================================================================\n");
-    printf("  EXPERIMENT E: LOD Ablation (2500 agents, 4 modes)\n");
+    printf("  EXPERIMENT E: LOD Ablation (2500 agents, no-LOD baseline + 4 modes)\n");
     printf("==================================================================\n");
 
     // Mode 1: Distance Only (baseline)
     // Mode 2: Distance + Visibility
     // Mode 3: Distance + Visibility + Interaction
     // Mode 0: Full 4-Factor (Distance + Visibility + Interaction + Density)
-    int modes[] = { 1, 2, 3, 0 };
-    const char* modeLabels[] = { "DistOnly", "Dist+Vis", "Dist+Vis+Inter", "Full_4Factor" };
-    int nModes = 4;
+    // Mode -1: No-LOD baseline. Every agent is forced to HIGH (thresholds below 0),
+    //          i.e. the cost of solving everyone at full detail.
+    int modes[] = { -1, 1, 2, 3, 0 };
+    const char* modeLabels[] = { "NoLOD_AllHigh", "DistOnly", "Dist+Vis", "Dist+Vis+Inter", "Full_4Factor" };
+    int nModes = 5;
     int n = 2500;
 
     fprintf(fTrials, "Experiment,AgentCount,AblationMode,ModeLabel,Trial,SolveMs,TotalMs,LOD0_Count,LOD1_Count,LOD2_Count,AvgPenetration,MaxPenetration\n");
@@ -627,7 +629,13 @@ void ExperimentE(FILE* fTrials, FILE* fStats) {
             srand(4142026);
             SetupAgentsUniform(agents, n, 0.5f);
             SetupParams(p, n);
-            p.lodAblationMode = mode;
+            if (mode < 0) {
+                p.lodAblationMode = 0;
+                p.highImportanceThresh = -1.0f;   // importance >= 0 always -> HIGH
+                p.medImportanceThresh  = -1.0f;
+            } else {
+                p.lodAblationMode = mode;
+            }
 
             StepCUDA(agents, n, &p, 3);
             CUDATimingData td;
@@ -691,6 +699,92 @@ void ExperimentE(FILE* fTrials, FILE* fStats) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// EXPERIMENT E2: LOD Ablation with a real camera (matches the Unity runtime)
+//
+// Experiment E has no camera (every agent "visible"), a focus point in the middle
+// of the crowd and Low agents solved every step, so LOD cannot save work there.
+// E2 reproduces the runtime: a CCTV-style camera at the west end of an 80 m
+// platform looking east (60 deg vertical FOV, 16:9, 40 m far plane), focus point
+// at the camera, and Low agents solved on every 4th step only.
+// Work = agent-iteration solves actually performed by the Jacobi kernel.
+// ═══════════════════════════════════════════════════════════════════════════════
+static void SetupCameraParams(SimParams& p, int frameIndex) {
+    const float camX = -45.0f, farDist = 40.0f;
+    const float halfH = 46.8f * 3.14159265f / 180.0f;   // horizontal half-FOV for 60 deg vertical @ 16:9
+    const float sh = sinf(halfH), ch = cosf(halfH);
+    p.focusPoint = make_float3(camX, 0.0f, 0.0f);
+    p.hasFrustumPlanes = 1;
+    p.frustumPlanes[0] = make_float4( 1.0f, 0.0f, 0.0f, -(camX + 0.3f));   // near
+    p.frustumPlanes[1] = make_float4(-1.0f, 0.0f, 0.0f,  camX + farDist);  // far
+    p.frustumPlanes[2] = make_float4(sh, 0.0f, -ch, -sh * camX);           // right
+    p.frustumPlanes[3] = make_float4(sh, 0.0f,  ch, -sh * camX);           // left
+    p.frustumPlanes[4] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);              // top (open)
+    p.frustumPlanes[5] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);              // bottom (open)
+    p.solveLowThisFrame = (frameIndex % 4 == 0) ? 1 : 0;                   // runtime cadence
+}
+
+void ExperimentE2(FILE* fTrials, FILE* fStats) {
+    printf("\n==================================================================\n");
+    printf("  EXPERIMENT E2: LOD Ablation with camera (2500 agents, runtime cadence)\n");
+    printf("==================================================================\n");
+
+    int modes[] = { -1, 1, 2, 3, 0 };
+    const char* modeLabels[] = { "Cam_NoLOD_AllHigh", "Cam_DistOnly", "Cam_Dist+Vis", "Cam_Dist+Vis+Inter", "Cam_Full_4Factor" };
+    const int nModes = 5, n = 2500, iters = 3, medCap = (iters + 1) / 2;
+
+    fprintf(fTrials, "Experiment,AgentCount,AblationMode,ModeLabel,Trial,SolveMs,TotalMs,LOD0_Count,LOD1_Count,LOD2_Count,AgentSolves\n");
+    AgentGPU* agents = (AgentGPU*)malloc(sizeof(AgentGPU) * n);
+    SimParams p;
+    double baseWork = 0.0, baseSolve = 0.0;
+
+    for (int mi = 0; mi < nModes; mi++) {
+        int mode = modes[mi];
+        std::vector<float> solveTrials, totalTrials, workTrials, l0, l1, l2;
+
+        for (int t = 0; t < WARMUP_TRIALS + MEASURED_TRIALS; t++) {
+            srand(4142026);
+            SetupAgentsUniform(agents, n, 0.5f);
+            SetupParams(p, n);
+            SetupCameraParams(p, t);
+            if (mode < 0) { p.lodAblationMode = 0; p.highImportanceThresh = -1.0f; p.medImportanceThresh = -1.0f; }
+            else            p.lodAblationMode = mode;
+
+            StepCUDA(agents, n, &p, iters);
+            CUDATimingData td;
+            GetLastTimings(&td);
+
+            int c0 = 0, c1 = 0, c2 = 0;
+            for (int i = 0; i < n; i++) {
+                if (agents[i].lodLevel == 0) c0++; else if (agents[i].lodLevel == 1) c1++; else c2++;
+            }
+            float work = (float)(c0 * iters + c1 * medCap + (p.solveLowThisFrame ? c2 : 0));
+
+            if (t >= WARMUP_TRIALS) {
+                solveTrials.push_back(td.solveMs); totalTrials.push_back(td.totalMs); workTrials.push_back(work);
+                l0.push_back((float)c0); l1.push_back((float)c1); l2.push_back((float)c2);
+                fprintf(fTrials, "E2,%d,%d,%s,%d,%.4f,%.4f,%d,%d,%d,%.0f\n",
+                    n, mode, modeLabels[mi], t - WARMUP_TRIALS + 1, td.solveMs, td.totalMs, c0, c1, c2, work);
+            }
+        }
+
+        Stats sSolve = ComputeStats(solveTrials), sTotal = ComputeStats(totalTrials), sWork = ComputeStats(workTrials);
+        Stats s0 = ComputeStats(l0), s1 = ComputeStats(l1), s2 = ComputeStats(l2);
+        if (mi == 0) { baseWork = sWork.mean; baseSolve = sSolve.mean; }
+        fprintf(fStats, "E2,%d,%s_Solve,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n", n, modeLabels[mi], sSolve.mean, sSolve.median, sSolve.stddev, sSolve.minVal, sSolve.maxVal, sSolve.p95, MEASURED_TRIALS);
+        fprintf(fStats, "E2,%d,%s_Total,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n", n, modeLabels[mi], sTotal.mean, sTotal.median, sTotal.stddev, sTotal.minVal, sTotal.maxVal, sTotal.p95, MEASURED_TRIALS);
+        fprintf(fStats, "E2,%d,%s_AgentSolves,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d\n", n, modeLabels[mi], sWork.mean, sWork.median, sWork.stddev, sWork.minVal, sWork.maxVal, sWork.p95, MEASURED_TRIALS);
+        fprintf(fStats, "E2,%d,%s_LOD0,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d\n", n, modeLabels[mi], s0.mean, s0.median, s0.stddev, s0.minVal, s0.maxVal, s0.p95, MEASURED_TRIALS);
+        fprintf(fStats, "E2,%d,%s_LOD1,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d\n", n, modeLabels[mi], s1.mean, s1.median, s1.stddev, s1.minVal, s1.maxVal, s1.p95, MEASURED_TRIALS);
+        fprintf(fStats, "E2,%d,%s_LOD2,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d\n", n, modeLabels[mi], s2.mean, s2.median, s2.stddev, s2.minVal, s2.maxVal, s2.p95, MEASURED_TRIALS);
+
+        printf("  [%-19s] solve=%.3f ms (%+.0f%%) | work=%.0f agent-solves (%+.0f%%) | LOD %d/%d/%d\n",
+            modeLabels[mi], sSolve.mean, 100.0 * (sSolve.mean / baseSolve - 1.0),
+            sWork.mean, 100.0 * (sWork.mean / baseWork - 1.0), (int)s0.mean, (int)s1.mean, (int)s2.mean);
+    }
+    free(agents);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 int main() {
@@ -732,6 +826,7 @@ int main() {
     ExperimentC(fTrials, fStats);
     ExperimentD(fTrials, fStats);
     ExperimentE(fTrials, fStats);
+    ExperimentE2(fTrials, fStats);
 
     fclose(fTrials);
     fclose(fStats);
@@ -739,7 +834,7 @@ int main() {
     ShutdownCUDA();
 
     printf("\n=================================================================\n");
-    printf("   PHASE 3 COMPLETE: All experiments (A-E) finished.\n");
+    printf("   PHASE 3 COMPLETE: All experiments (A-E, E2) finished.\n");
     printf("   Output: Phase3_Trials.csv, Phase3_Statistics.csv\n");
     printf("   Note: Experiment F (Unity runtime) requires Unity Editor.\n");
     printf("=================================================================\n");

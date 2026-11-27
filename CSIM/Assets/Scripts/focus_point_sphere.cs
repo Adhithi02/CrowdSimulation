@@ -32,6 +32,8 @@ public class FocusPointSphere : MonoBehaviour
     [Header("Debugging")] 
     [SerializeField] private bool debuggingMessages = false;
     [SerializeField] private bool displayFoveationLevels = false;
+    /// <summary>Show the foveated-animation spheres (toggled from the control panel or the D key).</summary>
+    public bool DisplayFoveation { get => displayFoveationLevels; set => displayFoveationLevels = value; }
     [SerializeField] private bool displayHz = false;
     [SerializeField] private GameObject sphere;
     [SerializeField] private Material sphereMaterial;

@@ -15,7 +15,8 @@ public enum ScenePreset
     Bidirectional,  // block at west end of corridor → goal east end (corridor squeeze)
     Bottleneck,     // block south of wall → goal north, squeeze through gap
     DoubleBottleneck, // two bottlenecks in sequence
-    MergeLane       // two lanes merge into one corridor
+    MergeLane,      // two lanes merge into one corridor
+    StationFlow     // realistic metro commute: street → fare gates → platform → train (default)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,10 +211,27 @@ public class SimulationManager : MonoBehaviour
         Instance = this;
     }
 
+    // A script reload during Play clears statics but does not re-run Awake;
+    // OnEnable does run again, so re-register here.
+    void OnEnable()
+    {
+        if (Instance == null) Instance = this;
+    }
+
     void Start()
     {
+        // Latency fix: cap physics catch-up. With the default 0.333 s cap, one slow
+        // frame queued up to 16 FixedUpdate solver steps into the next frame (a
+        // "spiral of death": ~8 ms per step but 4-6 FPS on screen). 0.05 s allows at
+        // most 2-3 steps per rendered frame; the crowd slows slightly instead of stalling.
+        Time.maximumDeltaTime = 0.05f;
+
         if (GetComponent<MetroStationManager>() == null)
             gameObject.AddComponent<MetroStationManager>();
+        if (GetComponent<StationFlowController>() == null)
+            gameObject.AddComponent<StationFlowController>();
+        if (GetComponent<PagpVisualizer>() == null)
+            gameObject.AddComponent<PagpVisualizer>();
 
         CacheGoals();
         CacheSolvers();
@@ -316,6 +334,7 @@ public class SimulationManager : MonoBehaviour
     public void Respawn()
     {
         StopAllCoroutines();
+        IsRespawning = true;
         StartCoroutine(DoRespawn());
     }
 
@@ -375,17 +394,28 @@ public class SimulationManager : MonoBehaviour
             case ScenePreset.Bottleneck:    SpawnBottleneck();    break;
             case ScenePreset.DoubleBottleneck: SpawnDoubleBottleneck(); break;
             case ScenePreset.MergeLane:     SpawnMergeLane();     break;
+            case ScenePreset.StationFlow:   SpawnStationFlow();   break;
             default:                        SpawnRandom();        break;
         }
 
         cellSize = Mathf.Max(4f, neighborDist);
 
-        _pbdJobsSolver?.Init(agents);
-        _forceJobsSolver?.Init(agents);
-        _clodSolver?.Init(agents);
-        _computeSolver?.Init(agents);
-        _cudaSolver?.Init(agents);
-        _cullingSolver?.Init(agents);
+        // Latency fix: initialise only the solver that will actually run. Previously
+        // every respawn allocated buffers for all six solvers (Jobs NativeArrays,
+        // compute buffers and CUDA device memory). Switching solver always respawns,
+        // so the newly selected solver is initialised at that point.
+        switch (activeSolver)
+        {
+            case SolverMode.PBDJobs:            _pbdJobsSolver?.Init(agents);   break;
+            case SolverMode.ForceJobs:          _forceJobsSolver?.Init(agents); break;
+            case SolverMode.PBDCLODJobs:        _clodSolver?.Init(agents);      break;
+            case SolverMode.PBDCompute:         _computeSolver?.Init(agents);   break;
+            case SolverMode.PBDCuda:            _cudaSolver?.Init(agents);      break;
+            case SolverMode.PBDCLODCullingJobs: _cullingSolver?.Init(agents);   break;
+        }
+
+        GetComponent<StationFlowController>()?.OnCrowdSpawned(activePreset == ScenePreset.StationFlow);
+        GetComponent<PagpVisualizer>()?.OnCrowdSpawned();
 
         FindObjectOfType<FocusPointSphere>()?.RefreshAgents();
 
@@ -396,6 +426,7 @@ public class SimulationManager : MonoBehaviour
 
         GetComponent<PBDCudaVisualLodController>()?.RefreshAgents();
         pm?.EndSample("Respawn");
+        IsRespawning = false;
     }
 
     // -----------------------------------------------------------------------
@@ -410,6 +441,7 @@ public class SimulationManager : MonoBehaviour
             case ScenePreset.Bidirectional: BuildCorridorWalls();      break;
             case ScenePreset.DoubleBottleneck: BuildDoubleBottleneckWalls(); break;
             case ScenePreset.MergeLane:     BuildMergeLaneWalls();     break;
+            case ScenePreset.StationFlow:   BuildStationFlowBlockers(); break;
             // Circle / Crossing / Random — open space, no geometry needed
         }
     }
@@ -510,6 +542,61 @@ public class SimulationManager : MonoBehaviour
         // ── Metro Props: Concourse Staircase Divider Signs & Floor Merge Line ──
         MakeStationProp("Metro_Stairs_Sign", new Vector3(c.x, 6.2f, dividerCenterZ + dividerLen * 0.4f), new Vector3(12f, 1.3f, 0.4f), new Color(0.15f, 0.45f, 0.75f));
         MakeStationProp("Metro_Merge_Floor_Line", new Vector3(c.x, 0.02f, c.z - 10f), new Vector3(0.5f, 0.02f, 25f), new Color(0.96f, 0.82f, 0.05f));
+    }
+
+    // Metro Commute: invisible collision blockers that sit exactly under the
+    // station visuals built by MetroStationManager (gate line, gate cabinets,
+    // platform screen doors, pillars, benches, kiosks, station walls).
+    void BuildStationFlowBlockers()
+    {
+        Vector3 c = _spawnCenter;
+        float L = StationLayout.HalfLength;
+        float gz = StationLayout.GateZ;
+        float innerX = StationLayout.GateCabinetX[StationLayout.GateCabinetX.Length - 1] + 0.59f;
+        float wing = L - innerX;
+
+        MakeBlocker("SF_GateLine_W", c + new Vector3(-(innerX + wing * 0.5f), 0.6f, gz), new Vector3(wing, 1.2f, 0.3f));
+        MakeBlocker("SF_GateLine_E", c + new Vector3(  innerX + wing * 0.5f,  0.6f, gz), new Vector3(wing, 1.2f, 0.3f));
+        foreach (float x in StationLayout.GateCabinetX)
+            MakeBlocker("SF_GateCabinet", c + new Vector3(x, 0.6f, gz), new Vector3(1.18f, 1.2f, 1.6f));
+
+        MakeBlocker("SF_ScreenDoors", c + new Vector3(0f, 1.2f, StationLayout.PsdZ), new Vector3(2f * L, 2.4f, 0.3f));
+        foreach (float x in StationLayout.PillarX)
+            MakeBlocker("SF_Pillar", c + new Vector3(x, 3f, StationLayout.PillarZ), new Vector3(1.1f, 6f, 1.1f));
+        foreach (float x in StationLayout.BenchX)
+            MakeBlocker("SF_Bench", c + new Vector3(x, 0.5f, StationLayout.PillarZ), new Vector3(2.4f, 1f, 0.6f));
+        MakeBlocker("SF_Kiosks", c + new Vector3(-16f, 1.1f, -16f), new Vector3(5f, 2.2f, 0.9f));
+
+        float h = StationLayout.WallHeight;
+        float depth = StationLayout.PsdZ - StationLayout.FloorMinZ;
+        float midZ = (StationLayout.PsdZ + StationLayout.FloorMinZ) * 0.5f;
+        MakeBlocker("SF_Wall_S", c + new Vector3(0f, h * 0.5f, StationLayout.FloorMinZ - 0.3f), new Vector3(2f * L + 1f, h, 0.6f));
+        MakeBlocker("SF_Wall_W", c + new Vector3(-L - 0.3f, h * 0.5f, midZ), new Vector3(0.6f, h, depth));
+        MakeBlocker("SF_Wall_E", c + new Vector3( L + 0.3f, h * 0.5f, midZ), new Vector3(0.6f, h, depth));
+    }
+
+    // Invisible NavMesh-carving obstacle + wall bounds (the visual is drawn by MetroStationManager).
+    void MakeBlocker(string name, Vector3 pos, Vector3 size)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(transform);
+        go.transform.position = pos;
+        var obs = go.AddComponent<NavMeshObstacle>();
+        obs.carving = true;
+        obs.shape = NavMeshObstacleShape.Box;
+        obs.size = size;
+        _geometryObjects.Add(go);
+        _wallBounds.Add(new Bounds(pos, size));
+    }
+
+    void SpawnStationFlow()
+    {
+        var flow = GetComponent<StationFlowController>();
+        for (int i = 0; i < agentCount; i++)
+        {
+            Vector3 p = flow != null ? flow.InitialSpawnPoint(i, _spawnCenter) : SampleNavMesh();
+            SpawnAgent(SnapNavMesh(p));
+        }
     }
 
     void MakeGapBarrier(string prefix, float centerZ, float gapCenterX, float gapWidth, float wallH, float wallThick, float wingLen)
@@ -877,8 +964,9 @@ public class SimulationManager : MonoBehaviour
 
         ApplyAgentParams(agent);
 
-        // Natural commuter movement speed variation (+/- 15%)
-        agent.prefSpeed *= Random.Range(0.85f, 1.15f);
+        // Natural commuter walking-speed variation (+/- 15%), kept by SyncParams.
+        agent.speedFactor = Random.Range(0.85f, 1.15f);
+        agent.prefSpeed = agentSpeed * agent.speedFactor;
 
         // Natural clothing color tint variation using MaterialPropertyBlock
         Color[] commuterTints = new Color[]
@@ -1203,7 +1291,7 @@ public class SimulationManager : MonoBehaviour
             a.neighborDist = neighborDist;
             a.maxAccel = maxAccel;
             a.mass = agentMass;
-            a.prefSpeed = agentSpeed;
+            a.prefSpeed = agentSpeed * a.speedFactor * a.speedScale;
 
             if (isPBD && a is PBDAgent pbd)
             {
@@ -1439,6 +1527,23 @@ void SetupPresentationLod()
         activePreset = preset;
         Respawn();
     }
+
+    /// <summary>
+    /// Applies solver, scenario and population together with exactly one respawn.
+    /// (Calling SetSolverMode + SetPreset + Respawn separately instantiated the
+    /// crowd up to three times in a row, which caused visible hitches.)
+    /// </summary>
+    public void Configure(SolverMode mode, ScenePreset preset, int count)
+    {
+        activeSolver = mode;
+        _lastSolver = mode;
+        activePreset = preset;
+        agentCount = Mathf.Max(1, count);
+        Respawn();
+    }
+
+    /// <summary>True while a respawn coroutine is still building the crowd.</summary>
+    public bool IsRespawning { get; private set; }
 
     // -----------------------------------------------------------------------
     // Gizmos

@@ -363,3 +363,5 @@ TSWLatexianTemp*
 
 #*.meta
 venv/
+# Native build outputs (regenerate with NativeCUDA/build.bat)
+NativeCUDA/build/

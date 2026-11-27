@@ -213,6 +213,7 @@ public class PBDCudaSolver : MonoBehaviour
     private SimParams  _params;
     private bool       _initialized;
     private CUDATimingData _currentTimings;
+    private readonly Plane[] _frustumScratch = new Plane[6];
 
     public CUDATimingData LastTimings => _currentTimings;
     public bool IsInitialized => _initialized;
@@ -257,8 +258,14 @@ public class PBDCudaSolver : MonoBehaviour
             {
                 Vector3 dir = pbd._agent.steeringTarget - pbd.transform.position;
                 dir.y = 0f;
+                // Arrival: ease off within ~1.5 m of the final destination and stop at
+                // 0.35 m, so waiting commuters stand still instead of jittering on the spot.
+                Vector3 toGoal = pbd._agent.destination - pbd.transform.position;
+                toGoal.y = 0f;
+                float goalDist = toGoal.magnitude;
+                float arrive = goalDist < 0.35f ? 0f : Mathf.Max(0.25f, Mathf.Clamp01((goalDist - 0.35f) / 1.2f));
                 if (dir.sqrMagnitude > 1e-4f)
-                    vPref = dir.normalized * pbd.prefSpeed;
+                    vPref = dir.normalized * (pbd.prefSpeed * arrive);
             }
 
             _hostAgents[i] = new AgentGPU
@@ -304,9 +311,10 @@ public class PBDCudaSolver : MonoBehaviour
         Camera cam = activeCamera != null ? activeCamera : Camera.main;
         if (cam != null)
         {
-            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+            // Reuse one plane buffer instead of allocating 6 planes every physics step.
+            GeometryUtility.CalculateFrustumPlanes(cam, _frustumScratch);
             for (int p = 0; p < 6; p++)
-                _params.frustumPlanes[p] = new Vector4(planes[p].normal.x, planes[p].normal.y, planes[p].normal.z, planes[p].distance);
+                _params.frustumPlanes[p] = new Vector4(_frustumScratch[p].normal.x, _frustumScratch[p].normal.y, _frustumScratch[p].normal.z, _frustumScratch[p].distance);
             _params.hasFrustumPlanes = 1;
         }
         else
@@ -386,6 +394,28 @@ public class PBDCudaSolver : MonoBehaviour
         }
         return RunBruteForceNeighborBenchmark(_hostAgents, _hostAgents.Length, radius, out candidates, out neighbors);
     }
+
+    /// <summary>
+    /// Controlled convergence test: solves a frozen copy of the current crowd with the
+    /// given number of Jacobi iterations (every agent at High detail) and measures the
+    /// overlap left afterwards. The live simulation is not changed.
+    /// </summary>
+    public bool SolveSnapshot(AgentGPU[] snapshot, int iterations, out ConstraintStats stats, out float solveMs)
+    {
+        stats = default; solveMs = 0f;
+        if (!_initialized || snapshot == null || snapshot.Length == 0) return false;
+        var copy = (AgentGPU[])snapshot.Clone();
+        var p = _params;
+        p.highImportanceThresh = -1f;   // everyone High: measure the solver, not the LOD
+        p.medImportanceThresh = -1f;
+        p.solveLowThisFrame = 1;
+        if (!StepCUDA(copy, copy.Length, ref p, iterations)) return false;
+        if (GetLastTimings(out var t)) solveMs = t.solveMs;
+        return MeasureConstraintViolations(copy, copy.Length, ref p, out stats);
+    }
+
+    /// <summary>Copy of the agent state sent to the GPU on the last step.</summary>
+    public AgentGPU[] SnapshotAgents() => _hostAgents != null ? (AgentGPU[])_hostAgents.Clone() : null;
 
     public bool QueryConstraintViolations(out ConstraintStats stats)
     {

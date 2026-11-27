@@ -19,6 +19,11 @@ public class AgentBase : MonoBehaviour
     public float t0 = 3.0f;
     public float goalRadius = 2.0f;
 
+    [Tooltip("Per-commuter walking-speed multiplier (natural variation).")]
+    public float speedFactor = 1f;
+    [Tooltip("Temporary multiplier, e.g. slowing down to tap a card at the fare gate.")]
+    public float speedScale = 1f;
+
     [Header("PBD Physical Properties")]
     [Tooltip("Heavier agents push lighter agents out of the way.")]
     public float mass = 1f;
