@@ -29,7 +29,8 @@ public enum SolverMode
     PBDJobs,            // PBD, parallelised with Unity Jobs + Burst
     PBDCLODJobs,        // PBD + Camera-LOD: high/med/low quality tiers by distance
     PBDCompute,         // GPU compute-shader solver with built-in LOD
-    PBDCLODCullingJobs  // CLOD + frustum culling: disables Renderer+Animator for off-screen agents
+    PBDCLODCullingJobs, // CLOD + frustum culling: disables Renderer+Animator for off-screen agents
+    PBDCuda             // Native NVIDIA CUDA C++ backend
 }
 
 /// <summary>
@@ -66,7 +67,7 @@ public class SimulationManager : MonoBehaviour
     // -----------------------------------------------------------------------
 
     [Header("Solver")]
-    public SolverMode activeSolver = SolverMode.PBDCLODJobs;
+    public SolverMode activeSolver = SolverMode.PBDCuda;
 
     // -----------------------------------------------------------------------
     // Inspector — Shared Agent Parameters (live-synced every frame)
@@ -133,15 +134,21 @@ public class SimulationManager : MonoBehaviour
     // Inspector — Debug
     // -----------------------------------------------------------------------
 
-    [Header("Debug")]
+    [Header("Debug & Metro Visualization")]
     public bool drawGrid = true;
+    [Tooltip("Dynamically tints agents based on live GPU/Job fidelity tier (Green=High, Yellow=Med, Blue=Low)")]
+    public bool showFidelityColors = false;
 
-    [Header("Benchmark Camera Protocol")]
-    [Tooltip("Keep one benchmark camera active for consistent measurements.")]
-    public bool enforceBenchmarkCameraProtocol = true;
-    [Tooltip("Optional benchmark camera. If null, Main Camera is used.")]
+    public enum CameraViewMode
+    {
+        VRCommuterEyeLevel,   // Immersive 1.7m eye-level perspective inside the crowd
+        StationOverheadView   // 60-degree angled overhead benchmark view
+    }
+
+    [Header("VR & Station Camera Mode")]
+    public CameraViewMode cameraViewMode = CameraViewMode.VRCommuterEyeLevel;
+    public bool enforceBenchmarkCameraProtocol = false;
     public Camera benchmarkCamera;
-    [Tooltip("Force an angled top view instead of agent eye view.")]
     public bool forceAngledTopBenchmarkView = true;
     [Range(45f, 85f)] public float benchmarkPitchDegrees = 60f;
     public float benchmarkYawDegrees = 180f;
@@ -187,6 +194,7 @@ public class SimulationManager : MonoBehaviour
     private ForceSolver _forceSolver;
     private ForceSolverJobs _forceJobsSolver;
     private PBDComputeSolver _computeSolver;
+    private PBDCudaSolver _cudaSolver;
     private CLODPBDCullingSolver _cullingSolver;
 
     // Change detection
@@ -204,11 +212,14 @@ public class SimulationManager : MonoBehaviour
 
     void Start()
     {
+        if (GetComponent<MetroStationManager>() == null)
+            gameObject.AddComponent<MetroStationManager>();
+
         CacheGoals();
         CacheSolvers();
         SetupFocusPoint();
         ResolveBenchmarkCamera();
-
+        SetupPresentationLod();
         _lastSolver = activeSolver;
         Respawn();
     }
@@ -227,7 +238,28 @@ public class SimulationManager : MonoBehaviour
             Respawn();
         }
 
+        if (showFidelityColors && Time.frameCount % 4 == 0)
+        {
+            UpdateFidelityVisuals();
+        }
+
         ProfilerManager.Instance?.LogFrameData(Time.frameCount);
+    }
+
+    void UpdateFidelityVisuals()
+    {
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var a = agents[i];
+            if (a == null) continue;
+            Color col = a.fidelityLevel switch
+            {
+                0 => new Color(0.2f, 1f, 0.35f), // Neon Green for HIGH (foveated / dense bottleneck)
+                1 => new Color(1f, 0.85f, 0.1f), // Amber Yellow for MED
+                _ => new Color(0.3f, 0.65f, 1f)  // Cyan Blue for LOW (peripheral / sparse)
+            };
+            ColorAgent(a, col);
+        }
     }
 
     void FixedUpdate()
@@ -316,6 +348,7 @@ public class SimulationManager : MonoBehaviour
 
         // Build preset geometry (walls/obstacles) first
         BuildPresetGeometry();
+        MetroStationManager.Instance?.BuildMetroStation3D();
 
         // Give the NavMesh obstacle carver a few frames to cut the holes.
         // One frame is rarely enough on large meshes.
@@ -351,9 +384,17 @@ public class SimulationManager : MonoBehaviour
         _forceJobsSolver?.Init(agents);
         _clodSolver?.Init(agents);
         _computeSolver?.Init(agents);
+        _cudaSolver?.Init(agents);
         _cullingSolver?.Init(agents);
 
         FindObjectOfType<FocusPointSphere>()?.RefreshAgents();
+
+        // MetroStationManager.Start can run before this coroutine has spawned agents.
+        // Re-apply the selected view here so CCTV follows the live crowd bounds.
+        if (MetroStationManager.Instance != null)
+            MetroStationManager.Instance.ApplyCCTVAngle(MetroStationManager.Instance.currentCCTV);
+
+        GetComponent<PBDCudaVisualLodController>()?.RefreshAgents();
         pm?.EndSample("Respawn");
     }
 
@@ -376,14 +417,13 @@ public class SimulationManager : MonoBehaviour
     // Wall barrier running along the X axis at Z=center, gap at X=center.
     // Agents spawn south of the wall and their goal is north — everyone squeezes
     // through the single gap.
+    // Metro Turnstiles & Fare-Gate Barriers
     void BuildBottleneckWalls()
     {
         Vector3 c = _spawnCenter;
 
         float gap      = Mathf.Max(spawnWidth * 0.15f, agentRadius * 8f);
         float wallH    = 6f;
-        // Thick walls: force-based agents steer by transforms (no physics), so a thicker
-        // wall means more NavMesh carving depth and less visual clipping on approach.
         float wallThick = 8f;
         float wingLen   = 500f;
 
@@ -394,24 +434,41 @@ public class SimulationManager : MonoBehaviour
         MakeWall("BN_Wall_R",
             c + new Vector3( gap * 0.5f + wingLen * 0.5f, wallH * 0.5f, 0f),
             new Vector3(wingLen, wallH, wallThick));
+
+        // ── Metro Props: Turnstile Glass Gates, Pedestals, Overhead Line Sign ──
+        MakeStationProp("Metro_Overhead_Sign_BN", c + new Vector3(0f, 7.5f, 0f), new Vector3(gap + 6f, 1.4f, 0.4f), new Color(0.1f, 0.65f, 0.25f));
+        MakeStationProp("Metro_Turnstile_Floor_Line", c + new Vector3(0f, 0.02f, -2.5f), new Vector3(gap + 4f, 0.02f, 0.8f), new Color(0.96f, 0.82f, 0.05f));
+        MakeStationProp("Metro_Pedestal_L", c + new Vector3(-gap * 0.5f, 1.2f, 0f), new Vector3(0.6f, 2.4f, 2.5f), new Color(0.18f, 0.2f, 0.22f), true);
+        MakeStationProp("Metro_Pedestal_R", c + new Vector3( gap * 0.5f, 1.2f, 0f), new Vector3(0.6f, 2.4f, 2.5f), new Color(0.18f, 0.2f, 0.22f), true);
+        MakeStationProp("Metro_GlassFlap_L", c + new Vector3(-gap * 0.25f, 1.1f, 0f), new Vector3(gap * 0.45f, 1.3f, 0.12f), new Color(0.25f, 0.85f, 0.95f));
+        MakeStationProp("Metro_GlassFlap_R", c + new Vector3( gap * 0.25f, 1.1f, 0f), new Vector3(gap * 0.45f, 1.3f, 0.12f), new Color(0.25f, 0.85f, 0.95f));
     }
 
+    // Metro Subway Platform & Train Boarding
     void BuildCorridorWalls()
     {
         Vector3 c = _spawnCenter;
-        // Wide corridor — room for two streams to pass organically without deadlock
         float corridorW = Mathf.Max(agentRadius * 30f, 14f);
         float wallH     = 4f;
         float wallThick = 2f;
         float wallLen   = 500f;
 
+        // North barrier: Subway Train Car body with Red Line livery
         MakeWall("BD_Wall_N",
             c + new Vector3(0f, wallH * 0.5f,  corridorW * 0.5f + wallThick * 0.5f),
             new Vector3(wallLen, wallH, wallThick));
 
+        // South barrier: Station concourse wall
         MakeWall("BD_Wall_S",
             c + new Vector3(0f, wallH * 0.5f, -corridorW * 0.5f - wallThick * 0.5f),
             new Vector3(wallLen, wallH, wallThick));
+
+        // ── Metro Props: Yellow Safety Edge, Train Roof, Platform Overhead Signs ──
+        MakeStationProp("Metro_Platform_Safety_Line", c + new Vector3(0f, 0.02f, corridorW * 0.5f - 0.5f), new Vector3(wallLen, 0.02f, 0.5f), new Color(0.96f, 0.82f, 0.05f));
+        MakeStationProp("Metro_Train_Roof", c + new Vector3(0f, wallH + 0.6f, corridorW * 0.5f + wallThick * 0.5f), new Vector3(wallLen, 0.8f, wallThick + 2.5f), new Color(0.22f, 0.25f, 0.28f));
+        MakeStationProp("Metro_Train_RedStripe", c + new Vector3(0f, wallH * 0.7f, corridorW * 0.5f - 0.05f), new Vector3(wallLen, 0.6f, 0.1f), new Color(0.85f, 0.15f, 0.15f));
+        MakeStationProp("Metro_Platform_Sign_1", c + new Vector3(-25f, 5.5f, 0f), new Vector3(14f, 1.3f, 0.4f), new Color(0.12f, 0.2f, 0.35f));
+        MakeStationProp("Metro_Platform_Sign_2", c + new Vector3( 25f, 5.5f, 0f), new Vector3(14f, 1.3f, 0.4f), new Color(0.12f, 0.2f, 0.35f));
     }
 
     void BuildDoubleBottleneckWalls()
@@ -424,6 +481,9 @@ public class SimulationManager : MonoBehaviour
 
         MakeGapBarrier("DBN_A", c.z - 10f, c.x - gap * 0.45f, gap, wallH, wallThick, wingLen);
         MakeGapBarrier("DBN_B", c.z + 10f, c.x + gap * 0.45f, gap, wallH, wallThick, wingLen);
+
+        MakeStationProp("Metro_Security_Sign_A", c + new Vector3(c.x - gap * 0.45f, 7.5f, c.z - 10f), new Vector3(gap + 4f, 1.2f, 0.4f), new Color(0.15f, 0.45f, 0.75f));
+        MakeStationProp("Metro_Security_Sign_B", c + new Vector3(c.x + gap * 0.45f, 7.5f, c.z + 10f), new Vector3(gap + 4f, 1.2f, 0.4f), new Color(0.75f, 0.25f, 0.15f));
     }
 
     void BuildMergeLaneWalls()
@@ -446,6 +506,10 @@ public class SimulationManager : MonoBehaviour
         MakeWall("MG_Divider",
             new Vector3(c.x, wallH * 0.5f, dividerCenterZ),
             new Vector3(wallThick, wallH, dividerLen));
+
+        // ── Metro Props: Concourse Staircase Divider Signs & Floor Merge Line ──
+        MakeStationProp("Metro_Stairs_Sign", new Vector3(c.x, 6.2f, dividerCenterZ + dividerLen * 0.4f), new Vector3(12f, 1.3f, 0.4f), new Color(0.15f, 0.45f, 0.75f));
+        MakeStationProp("Metro_Merge_Floor_Line", new Vector3(c.x, 0.02f, c.z - 10f), new Vector3(0.5f, 0.02f, 25f), new Color(0.96f, 0.82f, 0.05f));
     }
 
     void MakeGapBarrier(string prefix, float centerZ, float gapCenterX, float gapWidth, float wallH, float wallThick, float wingLen)
@@ -467,9 +531,19 @@ public class SimulationManager : MonoBehaviour
         go.transform.position   = pos;
         go.transform.localScale = size;
 
-        // Bright white walls — clearly visible on any background
+        // Metro-themed station architecture coloring
         var mr = go.GetComponent<MeshRenderer>();
-        if (mr != null) mr.material.color = new Color(0.85f, 0.85f, 0.85f);
+        if (mr != null)
+        {
+            if (name.Contains("BN") || name.Contains("DBN"))
+                mr.material.color = new Color(0.25f, 0.35f, 0.45f); // Turnstiles / Fare-Gate barriers
+            else if (name.Contains("BD"))
+                mr.material.color = new Color(0.75f, 0.22f, 0.18f); // Subway Train & Platform Edge (Red Line)
+            else if (name.Contains("MG"))
+                mr.material.color = new Color(0.2f, 0.45f, 0.7f);   // Concourse Stairs & Escalator divider
+            else
+                mr.material.color = new Color(0.85f, 0.85f, 0.85f);
+        }
 
         // Carves a hole in the NavMesh so agents path around / through the gap
         var obs = go.AddComponent<NavMeshObstacle>();
@@ -482,6 +556,35 @@ public class SimulationManager : MonoBehaviour
         // Register world-space bounds so PushAgentsFromWalls() can treat this
         // wall as a stationary obstacle in the same way solvers treat agents.
         _wallBounds.Add(new Bounds(pos, size));
+    }
+
+    // Creates metro station props (signs, platform edges, turnstile glass, ticket kiosks)
+    void MakeStationProp(string name, Vector3 pos, Vector3 size, Color color, bool carveNavMesh = false)
+    {
+        var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        go.name = name;
+        go.transform.SetParent(transform);
+        go.transform.position   = pos;
+        go.transform.localScale = size;
+
+        var mr = go.GetComponent<MeshRenderer>();
+        if (mr != null) mr.material.color = color;
+
+        if (carveNavMesh)
+        {
+            var obs = go.AddComponent<NavMeshObstacle>();
+            obs.carving = true;
+            obs.shape   = NavMeshObstacleShape.Box;
+            obs.size    = Vector3.one;
+            _wallBounds.Add(new Bounds(pos, size));
+        }
+        else
+        {
+            var col = go.GetComponent<Collider>();
+            if (col != null) Destroy(col);
+        }
+
+        _geometryObjects.Add(go);
     }
 
     // -----------------------------------------------------------------------
@@ -773,6 +876,29 @@ public class SimulationManager : MonoBehaviour
             : (AgentBase)go.AddComponent<ForceAgent>();
 
         ApplyAgentParams(agent);
+
+        // Natural commuter movement speed variation (+/- 15%)
+        agent.prefSpeed *= Random.Range(0.85f, 1.15f);
+
+        // Natural clothing color tint variation using MaterialPropertyBlock
+        Color[] commuterTints = new Color[]
+        {
+            new Color(0.25f, 0.35f, 0.45f), // Charcoal Navy
+            new Color(0.55f, 0.25f, 0.20f), // Burgundy Rust
+            new Color(0.20f, 0.45f, 0.35f), // Forest Green
+            new Color(0.60f, 0.55f, 0.50f), // Trench Beige
+            new Color(0.18f, 0.18f, 0.20f), // Dark Slate
+            new Color(0.70f, 0.60f, 0.35f)  // Ochre Mustard
+        };
+        Color randomClothing = commuterTints[Random.Range(0, commuterTints.Length)];
+        MaterialPropertyBlock mpb = new MaterialPropertyBlock();
+        mpb.SetColor("_Color", randomClothing);
+        foreach (var r in go.GetComponentsInChildren<Renderer>())
+        {
+            if (r != null && !r.gameObject.name.ToLower().Contains("sphere"))
+                r.SetPropertyBlock(mpb);
+        }
+
         agents.Add(agent);
         return agent;
     }
@@ -799,7 +925,7 @@ public class SimulationManager : MonoBehaviour
 
     // Returns the NavMesh floor height at a given XZ position, ignoring any
     // vertical offset on the manager GameObject itself.
-    Vector3 Center()
+    public Vector3 Center()
     {
         var xz = new Vector3(transform.position.x, 0f, transform.position.z);
         return NavMesh.SamplePosition(xz, out var hit, 200f, NavMesh.AllAreas)
@@ -886,6 +1012,10 @@ public class SimulationManager : MonoBehaviour
                 UpdateComputeImportanceParams();
                 _computeSolver?.Solve(agents, dt, pbdIterations, focus);
                 break;
+            case SolverMode.PBDCuda:
+                UpdateCudaImportanceParams();
+                _cudaSolver?.Solve(agents, dt, pbdIterations, focus);
+                break;
             case SolverMode.PBDCLODCullingJobs:
                 UpdateCLODDistances();
                 _cullingSolver?.Solve(agents, dt, pbdIterations, focus);
@@ -959,6 +1089,9 @@ public class SimulationManager : MonoBehaviour
             if (moved)
             {
                 agent.transform.position = pos;
+                // Wall ejection changes the Transform outside NavMeshAgent. Keep
+                // pathing attached to the same nearby floor before its next route update.
+                TryRecoverAgentOnNavMesh(agent);
 
                 // Cancel the velocity component pointing INTO any wall that was hit.
                 // Without this, PBD-Jobs re-accelerates the agent back into the wall
@@ -1038,6 +1171,23 @@ public class SimulationManager : MonoBehaviour
             _computeSolver.activeCamera = cam;
     }
 
+    void UpdateCudaImportanceParams()
+    {
+        if (_cudaSolver == null) return;
+        var cam = benchmarkCamera != null ? benchmarkCamera : Camera.main;
+        _cudaSolver.weightDistance = weightDistance;
+        _cudaSolver.weightVisibility = weightVisibility;
+        _cudaSolver.weightInteraction = weightInteraction;
+        _cudaSolver.weightDensity = weightDensity;
+        _cudaSolver.highImportanceThreshold = highImportanceThreshold;
+        _cudaSolver.medImportanceThreshold = medImportanceThreshold;
+        _cudaSolver.maxImportanceDistance = maxImportanceDistance;
+        _cudaSolver.maxInteractionContacts = maxInteractionContacts;
+        _cudaSolver.highDensityCutoff = maxImportanceDensity;
+        if (cam != null)
+            _cudaSolver.activeCamera = cam;
+    }
+
     // -----------------------------------------------------------------------
     // Live parameter sync (called every FixedUpdate)
     // -----------------------------------------------------------------------
@@ -1072,14 +1222,22 @@ public class SimulationManager : MonoBehaviour
     }
 
     // Repath agents when goals are moved in the Scene view
-    void RefreshDestinations()
+void RefreshDestinations()
     {
         const float sqrThresh = 0.01f;
         foreach (var a in agents)
         {
-            if (a.goal == null || a._agent == null) continue;
+            if (a == null || !a.enabled || !a.gameObject.activeInHierarchy ||
+                a.goal == null || a._agent == null || !a._agent.enabled)
+                continue;
+
+            // PBD and wall correction update Transforms independently of the
+            // NavMeshAgent. Recover locally before reading/writing its path.
+            if (!TryRecoverAgentOnNavMesh(a))
+                continue;
+
             if ((a.goal.position - a._agent.destination).sqrMagnitude > sqrThresh)
-                a._agent.SetDestination(a.goal.position);
+                TrySetAgentDestination(a, a.goal.position);
         }
     }
 
@@ -1143,11 +1301,26 @@ public class SimulationManager : MonoBehaviour
         _forceJobsSolver = GetComponent<ForceSolverJobs>();
 
         _computeSolver = GetComponent<PBDComputeSolver>();
+        _cudaSolver = GetComponent<PBDCudaSolver>();
+        if (_cudaSolver == null) _cudaSolver = gameObject.AddComponent<PBDCudaSolver>();
         _clodSolver = GetComponent<CLODPBDSolverJobs>();
         _cullingSolver = GetComponent<CLODPBDCullingSolver>();
         // CLODPBDSolverJobs is now MonoBehaviour to manage memory better.
         // CLODPBDSolverJobs is a plain class, not a MonoBehaviour — already newed above
     }
+
+void SetupPresentationLod()
+    {
+        var presentation = GetComponent<PBDCudaVisualLodController>();
+        if (presentation == null)
+            presentation = gameObject.AddComponent<PBDCudaVisualLodController>();
+
+        // Showcase is clean by default; F8 exposes optional visual-LOD diagnostics.
+        presentation.cleanShowcaseMode = true;
+        showFidelityColors = false;
+        drawGrid = false;
+    }
+
 
     void SetupFocusPoint()
     {
@@ -1191,22 +1364,37 @@ public class SimulationManager : MonoBehaviour
     void ApplyBenchmarkCameraView()
     {
         ResolveBenchmarkCamera();
-        if (!forceAngledTopBenchmarkView || benchmarkCamera == null) return;
+        if (benchmarkCamera == null) return;
 
         var t = benchmarkCamera.transform;
         t.localScale = Vector3.one;
-        Quaternion rot = Quaternion.Euler(benchmarkPitchDegrees, benchmarkYawDegrees, 0f);
-        Vector3 forward = rot * Vector3.forward;
-        float down = Mathf.Max(0.05f, -forward.y);
-        float dist = benchmarkCameraHeight / down;
 
-        t.rotation = rot;
-        t.position = _spawnCenter - forward * dist;
+        if (cameraViewMode == CameraViewMode.VRCommuterEyeLevel)
+        {
+            // First-person VR commuter perspective at human eye height (1.7m)
+            benchmarkCamera.orthographic = false;
+            benchmarkCamera.fieldOfView = 75f;
+            benchmarkCamera.nearClipPlane = 0.1f;
+            benchmarkCamera.farClipPlane = 500f;
+            t.position = _spawnCenter + new Vector3(0f, 1.7f, -14f);
+            t.rotation = Quaternion.Euler(6f, 0f, 0f);
+        }
+        else
+        {
+            // 60-degree angled overhead benchmark view
+            Quaternion rot = Quaternion.Euler(benchmarkPitchDegrees, benchmarkYawDegrees, 0f);
+            Vector3 forward = rot * Vector3.forward;
+            float down = Mathf.Max(0.05f, -forward.y);
+            float dist = benchmarkCameraHeight / down;
 
-        benchmarkCamera.orthographic = true;
-        benchmarkCamera.orthographicSize = benchmarkOrthoSize;
-        benchmarkCamera.nearClipPlane = 0.3f;
-        benchmarkCamera.farClipPlane = 1000f;
+            t.rotation = rot;
+            t.position = _spawnCenter - forward * dist;
+
+            benchmarkCamera.orthographic = true;
+            benchmarkCamera.orthographicSize = benchmarkOrthoSize;
+            benchmarkCamera.nearClipPlane = 0.3f;
+            benchmarkCamera.farClipPlane = 1000f;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1215,6 +1403,7 @@ public class SimulationManager : MonoBehaviour
 
     public int LiveAgentCount => agents.Count;
     public float CurrentFPS => 1f / Mathf.Max(Time.unscaledDeltaTime, 1e-4f);
+    public AgentBase GetAgent(int index) => (index >= 0 && index < agents.Count) ? agents[index] : null;
 
     public void GetFidelityCounts(out int high, out int med, out int low)
     {
@@ -1234,6 +1423,14 @@ public class SimulationManager : MonoBehaviour
         activeSolver = mode;
         _lastSolver = mode;
         Respawn();
+    }
+
+    public void ToggleCameraMode()
+    {
+        cameraViewMode = (cameraViewMode == CameraViewMode.VRCommuterEyeLevel)
+            ? CameraViewMode.StationOverheadView
+            : CameraViewMode.VRCommuterEyeLevel;
+        ApplyBenchmarkCameraView();
     }
 
     public void SetPreset(ScenePreset preset)
@@ -1266,5 +1463,54 @@ public class SimulationManager : MonoBehaviour
             Gizmos.color = new Color(1, 1, 1, 0.2f);
             Gizmos.DrawWireCube(center, size);
         }
+    }
+
+
+/// <summary>
+    /// Restores a displaced active agent to the closest local NavMesh point.
+    /// The small radius prevents a recovery from jumping to another station area.
+    /// </summary>
+    public bool TryRecoverAgentOnNavMesh(AgentBase agent, float maxRecoveryDistance = 1.5f)
+    {
+        if (agent == null || !agent.enabled || !agent.gameObject.activeInHierarchy)
+            return false;
+
+        var navAgent = agent._agent;
+        if (navAgent == null || !navAgent.enabled || !navAgent.gameObject.activeInHierarchy)
+            return false;
+
+        if (navAgent.isOnNavMesh)
+            return true;
+
+        Vector3 origin = agent.transform.position;
+        if (!NavMesh.SamplePosition(origin, out var hit, maxRecoveryDistance, NavMesh.AllAreas))
+            return false;
+
+        // Keep recovery local: do not move an agent across the station merely to
+        // regain a path.  SamplePosition includes vertical distance too.
+        if ((hit.position - origin).sqrMagnitude > maxRecoveryDistance * maxRecoveryDistance)
+            return false;
+
+        agent.transform.position = hit.position;
+        agent.predictedPosition = hit.position;
+
+        if (!navAgent.Warp(hit.position))
+            return false;
+
+        navAgent.nextPosition = hit.position;
+        return navAgent.isOnNavMesh;
+    }
+
+    public bool TrySetAgentDestination(AgentBase agent, Vector3 destination)
+    {
+        if (agent == null || !agent.enabled || !agent.gameObject.activeInHierarchy ||
+            agent._agent == null || !agent._agent.enabled)
+            return false;
+
+        if (!TryRecoverAgentOnNavMesh(agent))
+            return false;
+
+        agent._agent.SetDestination(destination);
+        return true;
     }
 }

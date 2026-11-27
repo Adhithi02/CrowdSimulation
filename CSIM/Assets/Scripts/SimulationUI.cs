@@ -9,40 +9,49 @@ using UnityEngine;
 using UnityEngine.UI;
 
 /// <summary>
-/// Compact Canvas UI — matches the style of photo 2.
-/// Attach to the same GameObject as SimulationManager.
-/// No TextMeshPro required.
+/// Metro Operations Control Center UI (OCC Digital Twin interface)
+/// Visual Theme: Dark navy & charcoal background (#0B1320 / #1C2541), cyan highlights (#00E5FF),
+/// clean typography, green/yellow/red status indicators, and PAGP Performance Lab dashboard.
 /// </summary>
 public class SimulationUI : MonoBehaviour
 {
     [Header("Appearance")]
-    public float panelWidth = 440f;
-    public int   fontSize   = 18;
+    public float panelWidth = 470f;
+    public int   fontSize   = 17;
 
-    // ── runtime refs ──────────────────────────────────────────────────────
+    // Palette: Metro OCC Digital Twin Theme
+    private static readonly Color ColorBgPanel     = new Color(0.043f, 0.075f, 0.125f, 0.94f); // #0B1320
+    private static readonly Color ColorCyanAccent  = new Color(0.0f, 0.90f, 1.0f);              // #00E5FF
+    private static readonly Color ColorActiveBtn   = new Color(0.0f, 0.70f, 0.85f);
+    private static readonly Color ColorInactiveBtn = new Color(0.12f, 0.17f, 0.24f);
+    private static readonly Color ColorHeaderTxt   = new Color(0.85f, 0.92f, 1.0f);
+    private static readonly Color ColorSubTxt      = new Color(0.55f, 0.65f, 0.78f);
+    private static readonly Color ColorGreenStatus = new Color(0.2f, 0.95f, 0.45f);
+    private static readonly Color ColorOrangeAlert = new Color(1.0f, 0.65f, 0.15f);
+    private static readonly Color ColorRedAlarm    = new Color(1.0f, 0.25f, 0.25f);
+
     private SimulationManager _mgr;
     private Font _font;
     private GameObject _canvasRoot;
     private GameObject _controlsRoot;
     private Text _toggleControlsLabel;
-    private Text _comparisonStatusLbl;
-    private Text _compareButtonLabel;
-    private Text _cpuGpuCompareButtonLabel;
-    private Button _compareButton;
-    private CanvasGroup _controlsCanvasGroup;
-    private Coroutine _comparisonRoutine;
+    private Text _statusLbl;
+    private Text _telemetryLbl;
+    private Text _perfLabStatusLbl;
+    private Text _cctvBtnLabel;
+    private Text _evacBtnLabel;
+    private Text _pauseBtnLabel;
+    private Text _visualLodBtnLabel;
 
     private static readonly SolverMode[] Modes =
     {
-        SolverMode.Force,    SolverMode.ForceJobs,
-        SolverMode.PBD,      SolverMode.PBDJobs,
-        SolverMode.PBDCLODJobs, SolverMode.PBDCompute,
+        SolverMode.Force,       SolverMode.ForceJobs,
+        SolverMode.PBD,         SolverMode.PBDJobs,
+        SolverMode.PBDCLODJobs, SolverMode.PBDCuda,
         SolverMode.PBDCLODCullingJobs
     };
     private static readonly string[] ModeLabels =
-        { "Force", "F-Jobs", "PBD", "PBD-Jobs", "CLOD", "PBD-Cmp", "Cull" };
-    private static readonly SolverMode[] PbdBackendModes =
-        { SolverMode.PBDJobs, SolverMode.PBDCompute };
+        { "Force", "F-Jobs", "PBD", "PBD-Jobs", "CLOD", "CUDA (GPU)", "Cull" };
 
     private static readonly ScenePreset[] Presets =
     {
@@ -51,7 +60,7 @@ public class SimulationUI : MonoBehaviour
         ScenePreset.DoubleBottleneck, ScenePreset.MergeLane
     };
     private static readonly string[] PresetLabels =
-        { "Random", "Circle", "Crossing", "Bi-Dir", "Bottleneck", "Double-BN", "MergeLane" };
+        { "Concourse", "Circle", "Crossing", "Platform", "Turnstiles", "Double-Gate", "Stair-Merge" };
 
     private Button[] _solverBtns;
     private Image[]  _solverImgs;
@@ -62,93 +71,111 @@ public class SimulationUI : MonoBehaviour
     private Slider _pbdIterSld, _pbdKsiSld;
     private Slider _forceKSld, _forceT0Sld;
 
-    private Text _statusLbl;
     private Text _agentLbl, _speedLbl, _radiusLbl, _neighLbl;
     private Text _pbdIterLbl, _pbdKsiLbl;
     private Text _forceKLbl, _forceT0Lbl;
 
     private GameObject _pbdSec, _forceSec;
 
-    private sealed class SolverComparisonResult
-    {
-        public SolverMode Mode;
-        public string ImageFile;
-        public float Fps;
-        public float FrameAverage;
-        public float Frame95;
-        public float NeighborAverage;
-        public float Neighbor95;
-        public float SolverAverage;
-        public float Solver95;
-        public float GpuComputeAverage;
-        public float GpuCompute95;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
     void Start()
     {
         _mgr = SimulationManager.Instance;
         if (_mgr == null) { enabled = false; return; }
 
-        _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        if (GetComponent<PAGPPerformanceLab>() == null)
+            gameObject.AddComponent<PAGPPerformanceLab>();
 
-        Build();
+        _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        BuildOCCInterface();
     }
 
     void Update()
     {
         if (_mgr == null) return;
-        string status = $"{_mgr.activeSolver} | {_mgr.LiveAgentCount} agents";
-        if (_mgr.activeSolver == SolverMode.PBDCLODJobs ||
-            _mgr.activeSolver == SolverMode.PBDCompute ||
-            _mgr.activeSolver == SolverMode.PBDCLODCullingJobs)
-        {
-            _mgr.GetFidelityCounts(out int high, out int med, out int low);
-            status += $" | H:{high} M:{med} L:{low}";
-        }
-        _statusLbl.text = status;
 
-        SetLbl(_agentLbl,   "Agent Count: ",  (int)_agentSld.value);
-        SetLbl(_speedLbl,   "Speed: ",         _speedSld.value,  "F2");
-        SetLbl(_radiusLbl,  "Agent Radius: ",  _radiusSld.value, "F2");
-        SetLbl(_neighLbl,   "Neighbour Dist: ",_neighSld.value,  "F1");
-        SetLbl(_pbdIterLbl, "Iterations: ",   (int)_pbdIterSld.value);
-        SetLbl(_pbdKsiLbl,  "Ksi: ",           _pbdKsiSld.value, "F3");
-        SetLbl(_forceKLbl,  "K: ",             _forceKSld.value, "F2");
-        SetLbl(_forceT0Lbl, "t0: ",            _forceT0Sld.value,"F1");
+        float fps = 1.0f / Mathf.Max(Time.smoothDeltaTime, 1e-4f);
+        _mgr.GetFidelityCounts(out int high, out int med, out int low);
+        int total = high + med + low;
+        int savedPct = total > 0 ? (int)((float)low / total * 100f) : 0;
+
+        var metro = MetroStationManager.Instance;
+        string cctvInfo = metro != null ? metro.GetCCTVLabel() : "CCTV OFF";
+        string trainStatus = (metro != null && metro.isTrainAtPlatform) ? "<color=#00E5FF>[PLATFORM: TRAIN DOCKED]</color>" : "<color=#FFA500>[TRAIN IN TRANSIT]</color>";
+
+        // Top Status Header
+        _statusLbl.text = $"<b>METRO OCC DIGITAL TWIN</b> | <color=#00E5FF>{_mgr.activeSolver}</color> ({fps:F0} FPS)\n" +
+                          $"Live Commuters: <b>{_mgr.LiveAgentCount}</b> | {trainStatus}\n" +
+                           $"Simulation LOD: High: {high} | Med: {med} | Low: {low} (<b>{savedPct}% Saved</b>)\n" +
+                           $"{cctvInfo}";
+
+        if (metro != null && metro.isEvacuationActive)
+        {
+            _statusLbl.text += $"\n<color=#FF3B30><b>[EMERGENCY EVACUATION ACTIVE]</b> Time: {metro.evacuationTimer:F1}s | Remaining: {metro.remainingEvacuees}</color>";
+        }
+
+        var visualLod = _mgr.GetComponent<PBDCudaVisualLodController>();
+        if (visualLod != null)
+        {
+            _statusLbl.text += $"\nVisual LOD: {visualLod.VisibleCommuterCount} visible | " +
+                               $"Near {visualLod.NearCount} | Mid {visualLod.MidCount} | " +
+                               $"Far {visualLod.FarCount} | Hidden {visualLod.HiddenCount}";
+        }
+
+        // Live GPU / PAGP Telemetry block
+// Live GPU / PAGP Telemetry block
+        var cuda = _mgr.GetComponent<PBDCudaSolver>();
+        if (cuda != null && cuda.IsInitialized && _mgr.activeSolver == SolverMode.PBDCuda)
+        {
+            var t = cuda.LastTimings;
+            _telemetryLbl.text = $"CUDA Total Step: <b>{t.totalMs:F2} ms</b> | Jacobi Kernel: <b>{t.solveMs:F2} ms</b>\n" +
+                                 $"Memcpy H2D: {t.h2dMs:F2} ms | D2H: {t.d2hMs:F2} ms | Spatial Grid: {t.hashAgentsMs:F2} ms";
+        }
+        else
+        {
+            float fAvg = ProfilerManager.Instance != null ? ProfilerManager.Instance.GetAverageMs("Frame") : 0f;
+            _telemetryLbl.text = $"Host Frame Avg: <b>{fAvg:F2} ms</b> | Pipeline: CPU Burst Jobs";
+        }
+
+        // Performance Lab live status
+        var lab = PAGPPerformanceLab.Instance;
+        if (lab != null && _perfLabStatusLbl != null)
+        {
+            _perfLabStatusLbl.text = lab.isRunning
+                ? $"<color=#FFA500>RUNNING: {lab.currentBenchmarkName} ({(lab.benchmarkProgress * 100f):F0}%)</color>"
+                : $"<color=#00E5FF>STATUS: {lab.currentBenchmarkName}</color>";
+        }
+
+        SetLbl(_agentLbl,   "Commuters (Reset to apply): ", (int)_agentSld.value);
+        SetLbl(_speedLbl,   "Walking Speed: ",    _speedSld.value,  "F2");
+        SetLbl(_radiusLbl,  "Body Radius: ",      _radiusSld.value, "F2");
+        SetLbl(_neighLbl,   "Perception Dist: ",  _neighSld.value,  "F1");
+        SetLbl(_pbdIterLbl, "PBD Iterations: ",   (int)_pbdIterSld.value);
+        SetLbl(_pbdKsiLbl,  "Relaxation (Ksi): ", _pbdKsiSld.value, "F3");
+        SetLbl(_forceKLbl,  "Stiffness (K): ",    _forceKSld.value, "F2");
+        SetLbl(_forceT0Lbl, "Lookahead (t0): ",   _forceT0Sld.value,"F1");
 
         for (int i = 0; i < Modes.Length; i++)
         {
             bool on = _mgr.activeSolver == Modes[i];
-            _solverImgs[i].color = on
-                ? new Color(0.85f, 0.65f, 0f)
-                : new Color(0.28f, 0.28f, 0.28f);
-            _solverBtns[i].GetComponentInChildren<Text>().color =
-                on ? Color.black : new Color(0.8f, 0.8f, 0.8f);
+            _solverImgs[i].color = on ? ColorActiveBtn : ColorInactiveBtn;
+            _solverBtns[i].GetComponentInChildren<Text>().color = on ? Color.black : ColorHeaderTxt;
         }
 
         for (int i = 0; i < Presets.Length; i++)
         {
             bool on = _mgr.activePreset == Presets[i];
-            _presetImgs[i].color = on
-                ? new Color(0.2f, 0.7f, 0.55f)   // teal = active preset
-                : new Color(0.28f, 0.28f, 0.28f);
-            _presetBtns[i].GetComponentInChildren<Text>().color =
-                on ? Color.black : new Color(0.8f, 0.8f, 0.8f);
+            _presetImgs[i].color = on ? new Color(0.1f, 0.75f, 0.6f) : ColorInactiveBtn;
+            _presetBtns[i].GetComponentInChildren<Text>().color = on ? Color.black : ColorHeaderTxt;
         }
 
-        bool isPBD = _mgr.activeSolver != SolverMode.Force &&
-                     _mgr.activeSolver != SolverMode.ForceJobs;
+        bool isPBD = _mgr.activeSolver != SolverMode.Force && _mgr.activeSolver != SolverMode.ForceJobs;
         _pbdSec.SetActive(isPBD);
         _forceSec.SetActive(!isPBD);
     }
 
-    // ── construction ──────────────────────────────────────────────────────
-
-    void Build()
+    void BuildOCCInterface()
     {
-        // Canvas
-        var cGO = new GameObject("SimUI_Canvas");
+        var cGO = new GameObject("OCC_Canvas");
         _canvasRoot = cGO;
         cGO.transform.SetParent(transform);
         var cv = cGO.AddComponent<Canvas>();
@@ -160,73 +187,63 @@ public class SimulationUI : MonoBehaviour
         sc.matchWidthOrHeight  = 0.5f;
         cGO.AddComponent<GraphicRaycaster>();
 
-        // Panel
-        var pGO = Box(cGO.transform, "Panel", new Color(0.12f, 0.12f, 0.12f, 0.93f));
+        var pGO = Box(cGO.transform, "OCC_MainPanel", ColorBgPanel);
         var pRT = pGO.GetComponent<RectTransform>();
         pRT.anchorMin = pRT.anchorMax = pRT.pivot = new Vector2(0, 1);
-        pRT.anchoredPosition = new Vector2(10, -10);
+        pRT.anchoredPosition = new Vector2(12, -12);
         pRT.sizeDelta = new Vector2(panelWidth, 10);
 
         var vl = pGO.AddComponent<VerticalLayoutGroup>();
-        vl.padding    = new RectOffset(8, 8, 8, 10);
+        vl.padding    = new RectOffset(10, 10, 10, 10);
         vl.spacing    = 4;
         vl.childControlWidth = vl.childControlHeight = true;
         vl.childForceExpandWidth = true;
         vl.childForceExpandHeight = false;
-        pGO.AddComponent<ContentSizeFitter>().verticalFit =
-            ContentSizeFitter.FitMode.PreferredSize;
+        pGO.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
         var p = pGO.transform;
 
-        // Keep a compact title/status strip visible while the controls are collapsed.
-        var header = HRow(p, 4, 30);
-        var headerLayout = header.GetComponent<HorizontalLayoutGroup>();
-        headerLayout.childForceExpandWidth = false;
-        var title = Lbl(header, "Crowd Manager", fontSize + 1, FontStyle.Bold,
-            Color.white, fontSize + 7);
+        // Header Strip
+        var header = HRow(p, 4, 32);
+        var title = Lbl(header, "OPERATIONS CONTROL CENTER", fontSize, FontStyle.Bold, ColorCyanAccent, 28);
         title.GetComponent<LayoutElement>().flexibleWidth = 1;
-        var toggleButton = MkBtn(header, "Show", fontSize - 1, ToggleControls);
-        var toggleButtonLayout = toggleButton.GetComponent<LayoutElement>();
-        toggleButtonLayout.preferredWidth = 54;
-        toggleButtonLayout.flexibleWidth = 0;
-        _toggleControlsLabel = toggleButton.GetComponentInChildren<Text>();
+        var toggleBtn = MkBtn(header, "Collapse", fontSize - 2, ToggleControls);
+        toggleBtn.GetComponent<LayoutElement>().preferredWidth = 70;
+        _toggleControlsLabel = toggleBtn.GetComponentInChildren<Text>();
 
-        _statusLbl = Lbl(p, "", fontSize - 2, FontStyle.Normal,
-                         new Color(0.7f, 0.9f, 0.7f), fontSize + 2);
+        _statusLbl = Lbl(p, "", fontSize - 2, FontStyle.Normal, ColorHeaderTxt, fontSize * 5.0f);
 
-        _controlsRoot = SecGO(p, "Controls");
-        _controlsCanvasGroup = _controlsRoot.AddComponent<CanvasGroup>();
+        // Telemetry Box
+        var telBox = Box(p, "TelemetryBox", new Color(0.08f, 0.12f, 0.18f, 0.9f));
+        telBox.AddComponent<LayoutElement>().preferredHeight = 36;
+        var telL = telBox.AddComponent<VerticalLayoutGroup>();
+        telL.padding = new RectOffset(6, 6, 4, 4);
+        _telemetryLbl = Lbl(telBox.transform, "", fontSize - 3, FontStyle.Normal, ColorCyanAccent, 30);
+
+        _controlsRoot = SecGO(p, "ControlsContent");
         var controls = _controlsRoot.transform;
 
         HSep(controls);
 
-        // ── Switch Solver ───────────────────────────────────────────────
-        Lbl(controls, "Switch Solver:", fontSize, FontStyle.Bold,
-            Color.white, fontSize + 4);
-
-        // Row 1: Force | F-Jobs | PBD
-        var r1 = HRow(controls, 4, 28);
-        // Row 2: PBD-Jobs | CLOD | PBD-Cmp
-        var r2 = HRow(controls, 4, 28);
-        // Row 3: Cull (left-aligned, fixed width so it doesn't stretch full panel)
-        var r3 = HRow(controls, 4, 28);
+        // ── Solver Switcher ──
+        Lbl(controls, "PARALLEL ARCHITECTURE SOLVER:", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 20);
+        var r1 = HRow(controls, 4, 26);
+        var r2 = HRow(controls, 4, 26);
+        var r3 = HRow(controls, 4, 26);
         r3.GetComponent<HorizontalLayoutGroup>().childForceExpandWidth = false;
 
         _solverBtns = new Button[Modes.Length];
         _solverImgs = new Image[Modes.Length];
-
         Transform[] btnParents = { r1, r1, r1, r2, r2, r2, r3 };
+
         for (int i = 0; i < Modes.Length; i++)
         {
             int idx = i;
-            var b = MkBtn(btnParents[i], ModeLabels[i], fontSize - 1,
-                          () => _mgr.SetSolverMode(Modes[idx]));
-            if (i == Modes.Length - 1)
+            var b = MkBtn(btnParents[i], ModeLabels[i], fontSize - 2, () => _mgr.SetSolverMode(Modes[idx]));
+            if (i >= 6)
             {
-                // Row 3 has non-expanding children; give Cull a fixed width so it stays visible.
                 var le = b.gameObject.AddComponent<LayoutElement>();
-                le.preferredWidth = (panelWidth - 16f - 4f) / 3f;
-                le.flexibleWidth = 0;
+                le.preferredWidth = (panelWidth - 20f) / 3f;
             }
             _solverBtns[i] = b;
             _solverImgs[i] = b.GetComponent<Image>();
@@ -234,33 +251,26 @@ public class SimulationUI : MonoBehaviour
 
         HSep(controls);
 
-        // ── Scene presets ────────────────────────────────────────────────
-        Lbl(controls, "Scene Preset:", fontSize, FontStyle.Bold,
-            Color.white, fontSize + 4);
-
-        // Row 1: Random | Circle | Crossing
-        var pr1 = HRow(controls, 4, 28);
-        // Row 2: Bi-Dir | Bottleneck | Double-BN
-        var pr2 = HRow(controls, 4, 28);
-        // Row 3: MergeLane (left-aligned)
-        var pr3 = HRow(controls, 4, 28);
+        // ── Station Scenarios ──
+        Lbl(controls, "METRO SCENARIO PRESETS:", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 20);
+        var pr1 = HRow(controls, 4, 26);
+        var pr2 = HRow(controls, 4, 26);
+        var pr3 = HRow(controls, 4, 26);
         pr2.GetComponent<HorizontalLayoutGroup>().childForceExpandWidth = false;
         pr3.GetComponent<HorizontalLayoutGroup>().childForceExpandWidth = false;
 
         _presetBtns = new Button[Presets.Length];
         _presetImgs = new Image[Presets.Length];
-
         Transform[] presetParents = { pr1, pr1, pr1, pr2, pr2, pr2, pr3 };
+
         for (int i = 0; i < Presets.Length; i++)
         {
             int idx = i;
-            var b = MkBtn(presetParents[i], PresetLabels[i], fontSize - 2,
-                          () => _mgr.SetPreset(Presets[idx]));
+            var b = MkBtn(presetParents[i], PresetLabels[i], fontSize - 3, () => _mgr.SetPreset(Presets[idx]));
             if (i >= 3)
             {
                 var le = b.gameObject.AddComponent<LayoutElement>();
-                le.preferredWidth = (panelWidth - 16f - 4f) / 3f;
-                le.flexibleWidth  = 0;
+                le.preferredWidth = (panelWidth - 20f) / 3f;
             }
             _presetBtns[i] = b;
             _presetImgs[i] = b.GetComponent<Image>();
@@ -268,385 +278,147 @@ public class SimulationUI : MonoBehaviour
 
         HSep(controls);
 
-        // ── Common sliders ──────────────────────────────────────────────
-        Lbl(controls, "─── Common ───", fontSize - 1, FontStyle.Normal,
-            new Color(0.6f, 0.6f, 0.6f), fontSize + 2);
+        // ── Sliders ──
+        Lbl(controls, "─── SIMULATION TUNING ───", fontSize - 2, FontStyle.Normal, ColorSubTxt, 18);
+        (_agentSld,  _agentLbl)  = MkSlider(controls, "Commuters (Reset to apply): 50", _mgr.agentCount, 5, 5000, true,  v => _mgr.agentCount  = (int)v);
+        (_speedSld,  _speedLbl)  = MkSlider(controls, "Walking Speed: 5.00",   _mgr.agentSpeed, 0.5f, 15f, false, v => _mgr.agentSpeed  = v);
+        (_radiusSld, _radiusLbl) = MkSlider(controls, "Body Radius: 0.50",     _mgr.agentRadius, 0.1f, 2f,  false, v => _mgr.agentRadius = v);
+        (_neighSld,  _neighLbl)  = MkSlider(controls, "Perception Dist: 4.0",  _mgr.neighborDist, 1f, 20f, false, v => _mgr.neighborDist = v);
 
-        (_agentSld,  _agentLbl)  = MkSlider(controls, "Agent Count: 50",
-            _mgr.agentCount, 5, 500, true,  v => _mgr.agentCount  = (int)v);
-        (_speedSld,  _speedLbl)  = MkSlider(controls, "Speed: 5.00",
-            _mgr.agentSpeed,  0.5f, 15f, false, v => _mgr.agentSpeed  = v);
-        (_radiusSld, _radiusLbl) = MkSlider(controls, "Agent Radius: 0.50",
-            _mgr.agentRadius, 0.1f, 2f,  false, v => _mgr.agentRadius = v);
-        (_neighSld,  _neighLbl)  = MkSlider(controls, "Neighbour Dist: 4.0",
-            _mgr.neighborDist, 1f, 20f, false, v => _mgr.neighborDist = v);
-
-        // ── PBD section ─────────────────────────────────────────────────
         _pbdSec = SecGO(controls, "PBDSec");
-        Lbl(_pbdSec.transform, "─── PBD ───", fontSize - 1, FontStyle.Normal,
-            new Color(0.4f, 0.75f, 1f), fontSize + 2);
-        (_pbdIterSld, _pbdIterLbl) = MkSlider(_pbdSec.transform, "Iterations: 3",
-            _mgr.pbdIterations, 1, 20, true,  v => _mgr.pbdIterations = (int)v);
-        (_pbdKsiSld,  _pbdKsiLbl)  = MkSlider(_pbdSec.transform, "Ksi: 0.050",
-            _mgr.pbdKsi, 0.01f, 1f, false, v => _mgr.pbdKsi = v);
+        Lbl(_pbdSec.transform, "─── PBD PARAMETERS ───", fontSize - 2, FontStyle.Normal, ColorCyanAccent, 18);
+        (_pbdIterSld, _pbdIterLbl) = MkSlider(_pbdSec.transform, "PBD Iterations: 3", _mgr.pbdIterations, 1, 20, true,  v => _mgr.pbdIterations = (int)v);
+        (_pbdKsiSld,  _pbdKsiLbl)  = MkSlider(_pbdSec.transform, "Relaxation: 0.050",   _mgr.pbdKsi, 0.01f, 1f, false, v => _mgr.pbdKsi = v);
 
-        // ── Force section ────────────────────────────────────────────────
         _forceSec = SecGO(controls, "ForceSec");
-        Lbl(_forceSec.transform, "─── Force ───", fontSize - 1, FontStyle.Normal,
-            new Color(1f, 0.6f, 0.2f), fontSize + 2);
-        (_forceKSld,  _forceKLbl)  = MkSlider(_forceSec.transform, "K: 1.00",
-            _mgr.forceK,  0.1f, 5f,  false, v => _mgr.forceK  = v);
-        (_forceT0Sld, _forceT0Lbl) = MkSlider(_forceSec.transform, "t0: 3.0",
-            _mgr.forceT0, 0.5f, 10f, false, v => _mgr.forceT0 = v);
-
-        // ── Respawn ──────────────────────────────────────────────────────
-        HSep(controls);
-        var rb = MkBtn(controls, "Respawn Crowd", fontSize, () => _mgr.Respawn());
-        rb.GetComponent<Image>().color = new Color(0.15f, 0.45f, 0.15f);
-        rb.GetComponent<LayoutElement>().preferredHeight = 30;
-        var rbc = rb.colors;
-        rbc.highlightedColor = new Color(0.22f, 0.6f, 0.22f);
-        rbc.pressedColor     = new Color(0.1f,  0.3f, 0.1f);
-        rb.colors = rbc;
+        Lbl(_forceSec.transform, "─── FORCE PARAMETERS ───", fontSize - 2, FontStyle.Normal, ColorOrangeAlert, 18);
+        (_forceKSld,  _forceKLbl)  = MkSlider(_forceSec.transform, "Stiffness: 1.00", _mgr.forceK, 0.1f, 5f, false, v => _mgr.forceK = v);
+        (_forceT0Sld, _forceT0Lbl) = MkSlider(_forceSec.transform, "Lookahead: 3.0",  _mgr.forceT0, 0.5f, 10f, false, v => _mgr.forceT0 = v);
 
         HSep(controls);
-        Lbl(controls, "Solver Comparisons", fontSize - 1, FontStyle.Bold,
-            new Color(0.75f, 0.85f, 1f), fontSize + 4);
-        _compareButton = MkBtn(controls, "Compare All Solvers", fontSize,
-            StartAllSolversComparison);
-        _compareButton.GetComponent<Image>().color = new Color(0.12f, 0.32f, 0.5f);
-        _compareButtonLabel = _compareButton.GetComponentInChildren<Text>();
-        var cpuGpuCompareButton = MkBtn(controls, "Compare CPU vs GPU PBD", fontSize,
-            StartCpuGpuPbdComparison);
-        cpuGpuCompareButton.GetComponent<Image>().color = new Color(0.12f, 0.38f, 0.34f);
-        _cpuGpuCompareButtonLabel = cpuGpuCompareButton.GetComponentInChildren<Text>();
-        _comparisonStatusLbl = Lbl(controls, "", fontSize - 2, FontStyle.Normal,
-            new Color(0.75f, 0.9f, 0.75f), fontSize * 2);
 
-        _controlsRoot.SetActive(true);
-        _toggleControlsLabel.text = "Hide";
-    }
+        // ── Showcase Runtime Controls ──
+        HSep(controls);
+        Lbl(controls, "SHOWCASE CONTROLS:", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 20);
+        var showcaseRow = HRow(controls, 4, 28);
 
-    void StartAllSolversComparison()
-    {
-        StartSolverComparison(
-            Modes, "All solver comparison", "AllSolvers",
-            _compareButtonLabel, "Compare All Solvers");
-    }
+        var pauseBtn = MkBtn(showcaseRow, "Pause", fontSize - 2, TogglePause);
+        _pauseBtnLabel = pauseBtn.GetComponentInChildren<Text>();
 
-    void StartCpuGpuPbdComparison()
-    {
-        StartSolverComparison(
-            PbdBackendModes, "CPU vs GPU PBD comparison", "CpuGpuPbd",
-            _cpuGpuCompareButtonLabel, "Compare CPU vs GPU PBD");
-    }
+        var resetBtn = MkBtn(showcaseRow, "Reset Showcase", fontSize - 2, ResetShowcase);
+        resetBtn.GetComponent<Image>().color = new Color(0.16f, 0.38f, 0.30f);
 
-    void StartSolverComparison(
-        SolverMode[] modes,
-        string reportTitle,
-        string directoryName,
-        Text buttonLabel,
-        string idleButtonText)
-    {
-        if (_comparisonRoutine != null) return;
-        if (ProfilerManager.Instance == null)
-        {
-            _comparisonStatusLbl.text = "ProfilerManager is required for comparison.";
-            Debug.LogError("[SimulationUI] Cannot compare solvers without a ProfilerManager.");
-            return;
-        }
+        var visualLodBtn = MkBtn(showcaseRow, "Show Visual LOD", fontSize - 3, ToggleVisualLodDiagnostics);
+        _visualLodBtnLabel = visualLodBtn.GetComponentInChildren<Text>();
 
-        _comparisonRoutine = StartCoroutine(
-            CompareSolvers(modes, reportTitle, directoryName, buttonLabel, idleButtonText));
-    }
+        // ── Station Operations Controls ──
+// ── Station Operations Controls ──
+        Lbl(controls, "TRANSIT OPERATIONS:", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 20);
+        var opRow = HRow(controls, 4, 28);
+        var cctvBtn = MkBtn(opRow, "CCTV Angle", fontSize - 2, () => MetroStationManager.Instance?.CycleCCTVCamera());
+        _cctvBtnLabel = cctvBtn.GetComponentInChildren<Text>();
 
-    IEnumerator CompareSolvers(
-        SolverMode[] modes,
-        string reportTitle,
-        string directoryName,
-        Text buttonLabel,
-        string idleButtonText)
-    {
-        SolverMode originalSolver = _mgr.activeSolver;
-        ScenePreset originalPreset = _mgr.activePreset;
-        UnityEngine.Random.State randomState = UnityEngine.Random.state;
-        var profiler = ProfilerManager.Instance;
-        var results = new List<SolverComparisonResult>(modes.Length);
-        string outputDirectory = Path.Combine(
-            Application.persistentDataPath,
-            "SolverComparisons",
-            directoryName + "-" +
-            DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture));
+        var trainBtn = MkBtn(opRow, "Cycle Train", fontSize - 2, () => MetroStationManager.Instance?.TriggerTrainCycle());
+        trainBtn.GetComponent<Image>().color = new Color(0.12f, 0.38f, 0.32f);
 
-        Directory.CreateDirectory(outputDirectory);
-        _controlsCanvasGroup.interactable = false;
-        _controlsCanvasGroup.blocksRaycasts = false;
-        buttonLabel.text = "Comparing...";
-        _comparisonStatusLbl.text =
-            $"Runs {modes.Length} solvers; each gets 1s warm-up and 5s measurement.";
-
-        try
-        {
-            UnityEngine.Random.InitState(4142026);
-            if (_mgr.activePreset != ScenePreset.Circle)
-                _mgr.SetPreset(ScenePreset.Circle);
-            else
-                _mgr.Respawn();
-
-            for (int i = 0; i < modes.Length; i++)
+        var evacBtn = MkBtn(controls, "Emergency Evacuation Alarm: OFF", fontSize - 1, () => {
+            var m = MetroStationManager.Instance;
+            if (m != null)
             {
-                SolverMode mode = modes[i];
-                _comparisonStatusLbl.text = $"Running {mode} ({i + 1}/{modes.Length})...";
-
-                UnityEngine.Random.InitState(4142026);
-                if (_mgr.activeSolver != mode)
-                    _mgr.SetSolverMode(mode);
-                else
-                    _mgr.Respawn();
-
-                yield return null;
-                yield return new WaitForSecondsRealtime(1f);
-                profiler.ResetMeasurements();
-
-                ProfilerRecorder gpuRecorder = default;
-                try
-                {
-                    if (mode == SolverMode.PBDCompute)
-                    {
-                        gpuRecorder = ProfilerRecorder.StartNew(
-                            ProfilerCategory.Render,
-                            "PBDCompute.GPU",
-                            512,
-                            ProfilerRecorderOptions.GpuRecorder |
-                            ProfilerRecorderOptions.SumAllSamplesInFrame |
-                            ProfilerRecorderOptions.WrapAroundWhenCapacityReached);
-                    }
-
-                    float elapsed = 0f;
-                    int renderedFrames = 0;
-                    while (elapsed < 5f)
-                    {
-                        yield return null;
-                        float frameTime = Time.unscaledDeltaTime;
-                        if (frameTime > 0f) renderedFrames++;
-                        elapsed += frameTime;
-                    }
-
-                    var result = new SolverComparisonResult
-                    {
-                        Mode = mode,
-                        ImageFile = $"{mode}.png",
-                        Fps = elapsed > 0f ? renderedFrames / elapsed : float.NaN,
-                        FrameAverage = profiler.GetAverageMs("Frame"),
-                        Frame95 = profiler.GetPercentileMs("Frame", 95f),
-                        NeighborAverage = profiler.GetAverageMs("NeighborQuery"),
-                        Neighbor95 = profiler.GetPercentileMs("NeighborQuery", 95f),
-                        SolverAverage = profiler.GetAverageMs("Solver"),
-                        Solver95 = profiler.GetPercentileMs("Solver", 95f)
-                    };
-                    if (mode == SolverMode.PBDCompute && gpuRecorder.Valid)
-                        ReadGpuComputeMetrics(gpuRecorder, result);
-                    results.Add(result);
-
-                    _comparisonStatusLbl.text = $"Capturing {mode} ({i + 1}/{modes.Length})...";
-                    yield return CaptureComparisonImage(
-                        Path.Combine(outputDirectory, result.ImageFile));
-                }
-                finally
-                {
-                    if (gpuRecorder.Valid)
-                        gpuRecorder.Dispose();
-                }
+                m.ToggleEmergencyEvacuation();
+                _evacBtnLabel.text = m.isEvacuationActive ? "ALARM: EVACUATION ACTIVE" : "Emergency Evacuation Alarm: OFF";
             }
+        });
+        evacBtn.GetComponent<Image>().color = new Color(0.55f, 0.15f, 0.15f);
+        _evacBtnLabel = evacBtn.GetComponentInChildren<Text>();
 
-            string reportPath = Path.Combine(outputDirectory, "index.html");
-            File.WriteAllText(
-                Path.Combine(outputDirectory, "metrics.csv"),
-                BuildComparisonCsv(results),
-                Encoding.UTF8);
-            File.WriteAllText(
-                reportPath,
-                BuildComparisonHtml(
-                    reportTitle,
-                    results,
-                    _mgr.agentCount,
-                    _mgr.agentSpeed,
-                    _mgr.agentRadius,
-                    _mgr.neighborDist,
-                    _mgr.pbdIterations),
-                Encoding.UTF8);
+        // ── PAGP Performance Lab Scientific Suite ──
+        HSep(controls);
+        Lbl(controls, "PAGP PERFORMANCE LAB SCIENTIFIC SUITE:", fontSize - 1, FontStyle.Bold, ColorCyanAccent, 20);
+        _perfLabStatusLbl = Lbl(controls, "STATUS: Idle", fontSize - 3, FontStyle.Normal, ColorSubTxt, 18);
 
-            _comparisonStatusLbl.text = "Comparison complete. Opening report...";
-            Debug.Log($"[SimulationUI] Solver comparison saved to {reportPath}");
-            Application.OpenURL(new Uri(reportPath).AbsoluteUri);
-        }
-        finally
-        {
-            UnityEngine.Random.state = randomState;
-            if (_mgr != null)
-            {
-                if (_mgr.activePreset != originalPreset)
-                    _mgr.SetPreset(originalPreset);
-                if (_mgr.activeSolver != originalSolver)
-                    _mgr.SetSolverMode(originalSolver);
-            }
+        var labRow1 = HRow(controls, 4, 26);
+        var bSuite = MkBtn(labRow1, "1: CPU vs CUDA", fontSize - 3, () => PAGPPerformanceLab.Instance?.RunComprehensiveSuite());
+        bSuite.GetComponent<Image>().color = new Color(0.08f, 0.30f, 0.45f);
 
-            _controlsCanvasGroup.interactable = true;
-            _controlsCanvasGroup.blocksRaycasts = true;
-            buttonLabel.text = idleButtonText;
-            _comparisonRoutine = null;
-        }
+        var bHash = MkBtn(labRow1, "2: Spatial Hash vs O(N²)", fontSize - 3, () => PAGPPerformanceLab.Instance?.RunSpatialHashAnalysis());
+        bHash.GetComponent<Image>().color = new Color(0.18f, 0.28f, 0.42f);
+
+        var labRow2 = HRow(controls, 4, 26);
+        var bAbl = MkBtn(labRow2, "3: LOD Ablation", fontSize - 3, () => PAGPPerformanceLab.Instance?.RunLODAblationStudy());
+        bAbl.GetComponent<Image>().color = new Color(0.12f, 0.35f, 0.28f);
+
+        var bConv = MkBtn(labRow2, "4: PBD Convergence", fontSize - 3, () => PAGPPerformanceLab.Instance?.RunPBDConvergenceTest());
+        bConv.GetComponent<Image>().color = new Color(0.35f, 0.22f, 0.40f);
+
+        var labRow3 = HRow(controls, 4, 26);
+        var bMem = MkBtn(labRow3, "5: AoS vs SoA Memory", fontSize - 3, () => PAGPPerformanceLab.Instance?.RunMemoryLayoutBenchmark());
+        bMem.GetComponent<Image>().color = new Color(0.20f, 0.35f, 0.45f);
+
+        var bStop = MkBtn(labRow3, "Stop Test", fontSize - 3, () => PAGPPerformanceLab.Instance?.StopBenchmark());
+        bStop.GetComponent<Image>().color = new Color(0.50f, 0.15f, 0.15f);
+
+        var respawnBtn = MkBtn(controls, "Respawn Digital Twin Crowd", fontSize, () => _mgr.Respawn());
+        respawnBtn.GetComponent<Image>().color = new Color(0.12f, 0.45f, 0.25f);
     }
-
-    static void ReadGpuComputeMetrics(
-        ProfilerRecorder recorder,
-        SolverComparisonResult result)
-    {
-        var samples = new List<ProfilerRecorderSample>();
-        recorder.CopyTo(samples, false);
-        if (samples.Count == 0) return;
-
-        var values = new List<float>(samples.Count);
-        double total = 0d;
-        foreach (var sample in samples)
-        {
-            if (sample.Value <= 0) continue;
-            float milliseconds = sample.Value / 1000000f;
-            values.Add(milliseconds);
-            total += milliseconds;
-        }
-
-        if (values.Count == 0) return;
-        values.Sort();
-        result.GpuComputeAverage = (float)(total / values.Count);
-        result.GpuCompute95 = Percentile(values, 0.95f);
-    }
-
-    static float Percentile(List<float> sortedValues, float percentile)
-    {
-        float rank = percentile * (sortedValues.Count - 1);
-        int lower = (int)Math.Floor(rank);
-        int upper = Math.Min(lower + 1, sortedValues.Count - 1);
-        return Mathf.Lerp(sortedValues[lower], sortedValues[upper], rank - lower);
-    }
-
-    IEnumerator CaptureComparisonImage(string path)
-    {
-        bool canvasWasActive = _canvasRoot.activeSelf;
-        Texture2D image = null;
-
-        try
-        {
-            _canvasRoot.SetActive(false);
-
-            yield return new WaitForEndOfFrame();
-            image = ScreenCapture.CaptureScreenshotAsTexture();
-            if (image == null)
-                throw new InvalidOperationException("Unity did not return a comparison screenshot.");
-
-            File.WriteAllBytes(path, image.EncodeToPNG());
-        }
-        finally
-        {
-            if (image != null) Destroy(image);
-            _canvasRoot.SetActive(canvasWasActive);
-        }
-    }
-
-    static string BuildComparisonCsv(List<SolverComparisonResult> results)
-    {
-        var csv = new StringBuilder();
-        csv.AppendLine("solver,fps,script_frame_avg_ms,script_frame_p95_ms,neighbor_avg_ms,neighbor_p95_ms,cpu_solver_avg_ms,cpu_solver_p95_ms,gpu_compute_avg_ms,gpu_compute_p95_ms");
-        foreach (var result in results)
-        {
-            csv.Append(result.Mode).Append(',')
-                .Append(FormatMetric(result.Fps)).Append(',')
-                .Append(FormatMetric(result.FrameAverage)).Append(',')
-                .Append(FormatMetric(result.Frame95)).Append(',')
-                .Append(FormatMetric(result.NeighborAverage)).Append(',')
-                .Append(FormatMetric(result.Neighbor95)).Append(',')
-                .Append(FormatMetric(result.SolverAverage)).Append(',')
-                .Append(FormatMetric(result.Solver95)).Append(',')
-                .Append(FormatMetric(result.GpuComputeAverage)).Append(',')
-                .AppendLine(FormatMetric(result.GpuCompute95));
-        }
-        return csv.ToString();
-    }
-
-    static string BuildComparisonHtml(
-        string reportTitle,
-        List<SolverComparisonResult> results,
-        int agentCount,
-        float speed,
-        float radius,
-        float neighborDistance,
-        int pbdIterations)
-    {
-        var html = new StringBuilder();
-        html.AppendLine("<!doctype html><html><head><meta charset=\"utf-8\">");
-        html.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-        html.Append("<title>").Append(reportTitle).AppendLine("</title><style>");
-        html.AppendLine("body{font:16px Arial,sans-serif;background:#111827;color:#e5e7eb;margin:24px}");
-        html.AppendLine("h1{margin-bottom:6px}p{color:#b8c2d1}");
-        html.AppendLine(".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}");
-        html.AppendLine("article{background:#1f2937;border:1px solid #374151;border-radius:10px;padding:14px}");
-        html.AppendLine("img{width:100%;height:auto;display:block;background:#000;border-radius:6px}");
-        html.AppendLine("table{width:100%;border-collapse:collapse;margin-top:10px}");
-        html.AppendLine("td{padding:4px;border-bottom:1px solid #374151}td:last-child{text-align:right;font-variant-numeric:tabular-nums}");
-        html.AppendLine("</style></head><body>");
-        html.Append("<h1>").Append(reportTitle).AppendLine("</h1>");
-        html.Append("<p>Circle preset; ").Append(agentCount)
-            .Append(" agents; speed ").Append(FormatMetric(speed))
-            .Append(" m/s; radius ").Append(FormatMetric(radius))
-            .Append(" m; neighbor distance ").Append(FormatMetric(neighborDistance))
-            .Append(" m; ").Append(pbdIterations)
-            .AppendLine(" PBD iterations. Screenshots omit the runtime UI. CPU solver time is CPU-side; GPU compute time is a GPU profiler sample and may be n/a if unsupported.</p>");
-        html.AppendLine("<section class=\"grid\">");
-
-        foreach (var result in results)
-        {
-            html.Append("<article><h2>").Append(result.Mode).Append("</h2><img src=\"")
-                .Append(result.ImageFile).Append("\" alt=\"").Append(result.Mode)
-                .Append(" simulation screenshot\"><table>");
-            AppendMetricRow(html, "Average FPS", result.Fps);
-            AppendMetricRow(html, "Script-frame avg / p95 (ms)", result.FrameAverage, result.Frame95);
-            AppendMetricRow(html, "Neighbour avg / p95 (ms)", result.NeighborAverage, result.Neighbor95);
-            AppendMetricRow(html, "CPU solver avg / p95 (ms)", result.SolverAverage, result.Solver95);
-            AppendMetricRow(html, "GPU compute avg / p95 (ms)", result.GpuComputeAverage, result.GpuCompute95);
-            html.AppendLine("</table></article>");
-        }
-
-        html.AppendLine("</section></body></html>");
-        return html.ToString();
-    }
-
-    static void AppendMetricRow(StringBuilder html, string label, float value)
-    {
-        html.Append("<tr><td>").Append(label).Append("</td><td>")
-            .Append(FormatMetric(value)).AppendLine("</td></tr>");
-    }
-
-    static void AppendMetricRow(StringBuilder html, string label, float average, float p95)
-    {
-        html.Append("<tr><td>").Append(label).Append("</td><td>")
-            .Append(FormatMetric(average)).Append(" / ")
-            .Append(FormatMetric(p95)).AppendLine("</td></tr>");
-    }
-
-    static string FormatMetric(float value) =>
-        float.IsNaN(value) || float.IsInfinity(value)
-            ? "n/a"
-            : value.ToString("F2", CultureInfo.InvariantCulture);
 
     void ToggleControls()
     {
-        bool showControls = !_controlsRoot.activeSelf;
-        _controlsRoot.SetActive(showControls);
-        _toggleControlsLabel.text = showControls ? "Hide" : "Show";
+        bool show = !_controlsRoot.activeSelf;
+        _controlsRoot.SetActive(show);
+        _toggleControlsLabel.text = show ? "Collapse" : "Expand";
     }
 
-    // ── helpers ───────────────────────────────────────────────────────────
+void TogglePause()
+    {
+        bool paused = Time.timeScale > 0f;
+        Time.timeScale = paused ? 0f : 1f;
+        if (_pauseBtnLabel != null)
+            _pauseBtnLabel.text = paused ? "Resume" : "Pause";
+    }
 
+    void ResetShowcase()
+    {
+        Time.timeScale = 1f;
+        if (_pauseBtnLabel != null) _pauseBtnLabel.text = "Pause";
+
+        var metro = MetroStationManager.Instance;
+        if (metro != null && metro.isEvacuationActive)
+        {
+            // The existing normal-operation path already respawns the active preset.
+            metro.ToggleEmergencyEvacuation();
+            return;
+        }
+
+        _mgr?.Respawn();
+    }
+
+    void ToggleVisualLodDiagnostics()
+    {
+        var visualLod = _mgr != null ? _mgr.GetComponent<PBDCudaVisualLodController>() : null;
+        if (visualLod == null) return;
+
+        visualLod.ToggleDiagnostics();
+        if (_visualLodBtnLabel != null)
+            _visualLodBtnLabel.text = visualLod.showDiagnostics ? "Hide Visual LOD" : "Show Visual LOD";
+    }
+
+
+    GameObject SecGO(Transform parent, string name)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(parent, false);
+        var vl = go.AddComponent<VerticalLayoutGroup>();
+        vl.spacing = 3;
+        vl.childControlWidth = vl.childControlHeight = true;
+        vl.childForceExpandWidth = true;
+        vl.childForceExpandHeight = false;
+        go.AddComponent<ContentSizeFitter>().verticalFit =
+            ContentSizeFitter.FitMode.PreferredSize;
+        return go;
+    }
+
+    // ── Helper Constructors ──
     GameObject Box(Transform parent, string name, Color col)
     {
         var go = new GameObject(name);
@@ -661,14 +433,14 @@ public class SimulationUI : MonoBehaviour
         go.transform.SetParent(parent, false);
         var t = go.AddComponent<Text>();
         t.font = _font; t.text = txt; t.fontSize = sz;
-        t.fontStyle = fs; t.color = col; t.supportRichText = false;
+        t.fontStyle = fs; t.color = col; t.supportRichText = true;
         go.AddComponent<LayoutElement>().preferredHeight = h;
         return t;
     }
 
     void HSep(Transform parent)
     {
-        var go = Box(parent, "Sep", new Color(0.35f, 0.35f, 0.35f));
+        var go = Box(parent, "Sep", new Color(0.15f, 0.22f, 0.32f));
         var le = go.AddComponent<LayoutElement>();
         le.preferredHeight = le.minHeight = 1;
     }
@@ -686,20 +458,14 @@ public class SimulationUI : MonoBehaviour
         return go.transform;
     }
 
-    Button MkBtn(Transform parent, string label, int sz,
-                 UnityEngine.Events.UnityAction cb)
+    Button MkBtn(Transform parent, string label, int sz, UnityEngine.Events.UnityAction cb)
     {
-        var go = Box(parent, "Btn", new Color(0.28f, 0.28f, 0.28f));
+        var go = Box(parent, "Btn", ColorInactiveBtn);
         var le = go.AddComponent<LayoutElement>();
         le.preferredHeight = 28;
         var btn = go.AddComponent<Button>();
         btn.onClick.AddListener(cb);
         btn.targetGraphic = go.GetComponent<Image>();
-        var bc = btn.colors;
-        bc.normalColor      = new Color(0.28f, 0.28f, 0.28f);
-        bc.highlightedColor = new Color(0.38f, 0.38f, 0.38f);
-        bc.pressedColor     = new Color(0.15f, 0.15f, 0.15f);
-        btn.colors = bc;
 
         var lgo = new GameObject("L");
         lgo.transform.SetParent(go.transform, false);
@@ -710,58 +476,34 @@ public class SimulationUI : MonoBehaviour
         t.font = _font; t.text = label; t.fontSize = sz;
         t.fontStyle = FontStyle.Bold;
         t.alignment = TextAnchor.MiddleCenter;
-        t.color = Color.white;
-        t.supportRichText = false;
+        t.color = ColorHeaderTxt;
+        t.supportRichText = true;
         return btn;
     }
 
-    // A vertical-layout container (for PBD/Force sections)
-    GameObject SecGO(Transform parent, string name)
+    (Slider, Text) MkSlider(Transform parent, string labelTxt, float init, float min, float max, bool whole, UnityEngine.Events.UnityAction<float> cb)
     {
-        var go = new GameObject(name);
-        go.transform.SetParent(parent, false);
-        var vl = go.AddComponent<VerticalLayoutGroup>();
-        vl.spacing = 3;
-        vl.childControlWidth = vl.childControlHeight = true;
-        vl.childForceExpandWidth = true;
-        vl.childForceExpandHeight = false;
-        go.AddComponent<ContentSizeFitter>().verticalFit =
-            ContentSizeFitter.FitMode.PreferredSize;
-        return go;
-    }
+        var lbl = Lbl(parent, labelTxt, fontSize - 3, FontStyle.Normal, ColorHeaderTxt, fontSize);
 
-    // One slider row: label on top, slider below
-    (Slider, Text) MkSlider(Transform parent, string labelTxt,
-                             float init, float min, float max, bool whole,
-                             UnityEngine.Events.UnityAction<float> cb)
-    {
-        // Value label
-        var lbl = Lbl(parent, labelTxt, fontSize - 2, FontStyle.Normal,
-                      Color.white, fontSize);
-
-        // Slider sits in a thin container
         var sGO = new GameObject("SLD");
         sGO.transform.SetParent(parent, false);
-        sGO.AddComponent<LayoutElement>().preferredHeight = 18;
+        sGO.AddComponent<LayoutElement>().preferredHeight = 16;
 
-        // track
-        var bg = Box(sGO.transform, "Bg", new Color(0.18f, 0.18f, 0.18f));
+        var bg = Box(sGO.transform, "Bg", new Color(0.10f, 0.14f, 0.20f));
         var bgRT = bg.GetComponent<RectTransform>();
-        bgRT.anchorMin = new Vector2(0, 0.2f); bgRT.anchorMax = new Vector2(1, 0.8f);
+        bgRT.anchorMin = new Vector2(0, 0.25f); bgRT.anchorMax = new Vector2(1, 0.75f);
         bgRT.offsetMin = bgRT.offsetMax = Vector2.zero;
 
-        // fill area
         var fa = new GameObject("FA");
         fa.transform.SetParent(sGO.transform, false);
         var faRT = fa.AddComponent<RectTransform>();
-        faRT.anchorMin = new Vector2(0, 0.2f); faRT.anchorMax = new Vector2(1, 0.8f);
+        faRT.anchorMin = new Vector2(0, 0.25f); faRT.anchorMax = new Vector2(1, 0.75f);
         faRT.offsetMin = new Vector2(4, 0);   faRT.offsetMax = new Vector2(-12, 0);
-        var fill = Box(fa.transform, "F", new Color(0.2f, 0.55f, 1f));
+        var fill = Box(fa.transform, "F", ColorCyanAccent);
         var fillRT = fill.GetComponent<RectTransform>();
         fillRT.anchorMin = Vector2.zero; fillRT.anchorMax = Vector2.one;
         fillRT.offsetMin = fillRT.offsetMax = Vector2.zero;
 
-        // handle area
         var ha = new GameObject("HA");
         ha.transform.SetParent(sGO.transform, false);
         var haRT = ha.AddComponent<RectTransform>();
@@ -770,10 +512,9 @@ public class SimulationUI : MonoBehaviour
         var hnd = Box(ha.transform, "H", Color.white);
         var hndRT = hnd.GetComponent<RectTransform>();
         hndRT.anchorMin = Vector2.zero; hndRT.anchorMax = new Vector2(0, 1);
-        hndRT.sizeDelta = new Vector2(12, 0);
-        hndRT.offsetMin = new Vector2(-6, 1); hndRT.offsetMax = new Vector2(6, -1);
+        hndRT.sizeDelta = new Vector2(10, 0);
+        hndRT.offsetMin = new Vector2(-5, 0); hndRT.offsetMax = new Vector2(5, 0);
 
-        // Slider component on sGO (auto has RectTransform from Canvas parenting)
         var sld = sGO.AddComponent<Slider>();
         sld.fillRect = fillRT; sld.handleRect = hndRT;
         sld.direction = Slider.Direction.LeftToRight;
@@ -785,7 +526,6 @@ public class SimulationUI : MonoBehaviour
         return (sld, lbl);
     }
 
-    static void SetLbl(Text t, string prefix, int v)    => t.text = prefix + v;
-    static void SetLbl(Text t, string prefix, float v, string fmt) =>
-        t.text = prefix + v.ToString(fmt);
+    static void SetLbl(Text t, string prefix, int v) => t.text = prefix + v;
+    static void SetLbl(Text t, string prefix, float v, string fmt) => t.text = prefix + v.ToString(fmt);
 }

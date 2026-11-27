@@ -1781,8 +1781,8 @@ MonoBehaviour:
   agentCount: 300
   spawnWidth: 20
   spawnDepth: 20
-  activePreset: 0
-  activeSolver: 6
+  activePreset: 4
+  activeSolver: 7
   agentSpeed: 5
   agentRadius: 0.5
   neighborDist: 4

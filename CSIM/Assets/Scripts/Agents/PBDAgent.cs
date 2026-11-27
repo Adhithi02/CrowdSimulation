@@ -13,7 +13,9 @@ public class PBDAgent : AgentBase
     protected override void Start()
     {
         base.Start();
-        _agent.SetDestination(goal.position);
+        if (goal != null)
+            SimulationManager.Instance?.TrySetAgentDestination(this, goal.position);
+
         _agent.speed = speed;
         // PBD INTEGRATION: Stop NavMeshAgent from directly driving the Transform
         _agent.updatePosition = false;
@@ -35,20 +37,24 @@ public class PBDAgent : AgentBase
     public void SetGoal(Transform newGoal)
     {
         goal = newGoal;
-        if (_agent != null && goal != null)
+        if (goal == null)
         {
-            _agent.SetDestination(goal.position);
+            Debug.LogWarning("Goal is missing. Cannot set destination.");
+            return;
         }
-        else
-        {
-            Debug.LogWarning("NavMeshAgent component or goal is missing. Cannot set destination.");
-        }
+
+        SimulationManager.Instance?.TrySetAgentDestination(this, goal.position);
     }
 
     public void CheckDestinationReached()
     {
-        // We need at least 2 goals to be able to pick a different random one
-        if (goals == null || goals.Length <= 1) return;
+        // We need at least 2 goals to be able to pick a different random one.
+        if (goals == null || goals.Length <= 1 || _agent == null ||
+            !_agent.enabled || !gameObject.activeInHierarchy)
+            return;
+
+        if (!SimulationManager.Instance.TryRecoverAgentOnNavMesh(this))
+            return;
 
         if (!_agent.pathPending && _agent.remainingDistance < stopThreshold)
         {
