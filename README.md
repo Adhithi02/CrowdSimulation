@@ -2,7 +2,7 @@
 
 **Metro Station Digital Twin** — a Unity crowd simulation project with a native CUDA Position-Based Dynamics (PBD) backend and benchmark tools.
 
-The repository root contains the Unity project in `CSIM/`, native CUDA source in `NativeCUDA/`, and archived native benchmark results in `BenchmarkResults/`. Existing proposal, literature-review, and final-report LaTeX projects remain in their original folders.
+The repository root contains the Unity project in `CSIM/`, native CUDA source in `NativeCUDA/`, and archived native benchmark results in `BenchmarkResults/`. Historical proposal, literature-review, and earlier report documents are not part of the current implementation repository.
 
 ## Project at a glance
 
@@ -26,9 +26,6 @@ CSIM/                         Unity project root
   ProjectSettings/            Unity editor and project settings
 NativeCUDA/                   CUDA/C++ source, native tools, and CUDA README
 BenchmarkResults/             Archived experiment CSVs and reports
-CSIM_Literature _Review/       Existing literature-review LaTeX project
-CSIM_Proposal/                Existing proposal LaTeX project
-CSIM_Report/                  Existing project-report LaTeX project
 ```
 
 Unity folders and assets were not relocated. The required native runtime library remains at `CSIM/Assets/Plugins/x86_64/CrowdSimulationCUDA.dll`.

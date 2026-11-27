@@ -5,6 +5,9 @@
 **/.cache/
 **/.idea/
 **/.vs/
+/CSIM_Literature _Review/
+/CSIM_Proposal/
+/CSIM_Report/
 *.log
 *.tmp
 *.bak
