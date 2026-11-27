@@ -1,0 +1,5 @@
+AgentCount,AoSSolveKernelMs,SoASolveKernelMs,SpeedupRatio
+500,0.244,0.109,2.24
+1000,0.400,0.169,2.37
+2500,0.912,0.329,2.78
+5000,2.048,0.697,2.94

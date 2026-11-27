@@ -1,0 +1,9 @@
+Scenario,AgentCount,OccupiedBuckets,MaxPrimaryOccupancy,MaxSecondaryOccupancy,MaxTotalOccupancy,BucketsUsingOverflow,BucketsExceedingSecondary,TotalOverflowInsertions,TotalDroppedInsertions,Status
+Uniform_500,500,130,14,0,14,0,0,0,0,ALL_STORED_ZERO_DROPPED
+Uniform_1000,1000,137,16,2,18,1,0,2,0,ALL_STORED_ZERO_DROPPED
+Uniform_2500,2500,136,16,30,46,67,0,574,0,ALL_STORED_ZERO_DROPPED
+Uniform_5000,5000,137,16,60,76,132,0,2824,0,ALL_STORED_ZERO_DROPPED
+DenseQueue_1000,1000,8,16,64,217,8,4,872,481,DROPPED_CAP_EXCEEDED
+BoardingCluster_1000,1000,16,16,64,97,16,6,744,51,DROPPED_CAP_EXCEEDED
+ForcedHashCollision_80,80,1,16,64,80,1,0,64,0,ALL_STORED_ZERO_DROPPED
+OverloadedCell_Stress_200,200,1,16,64,200,1,1,184,120,DROPPED_CAP_EXCEEDED

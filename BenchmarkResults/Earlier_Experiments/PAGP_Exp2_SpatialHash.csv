@@ -1,0 +1,5 @@
+AgentCount,OccupiedCells,MaxCellOccupancy,BucketOverflowCount,BruteForceCandidates,ActualNeighbors,ChecksEliminatedPct
+500,134,13,73054,249500,4854,76.55
+1000,136,20,73062,999000,19042,85.59
+2500,137,36,73588,6247500,122208,94.24
+5000,136,73,76412,24995000,481018,97.12

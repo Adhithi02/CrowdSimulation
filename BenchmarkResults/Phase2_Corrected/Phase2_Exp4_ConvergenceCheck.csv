@@ -1,0 +1,7 @@
+Iterations,SolverKernelTimeMs,AveragePenetrationMeters,MaxPenetrationMeters,ActiveConstraints
+1,0.378,0.3234,0.9752,3865
+2,0.767,0.3027,0.9444,3844
+4,1.558,0.2668,0.8344,3775
+8,3.132,0.2139,0.7433,3674
+12,4.607,0.1643,0.7289,3492
+16,6.017,0.1399,0.5253,3202

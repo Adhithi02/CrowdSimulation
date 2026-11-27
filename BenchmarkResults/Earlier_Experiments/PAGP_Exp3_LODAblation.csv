@@ -1,0 +1,5 @@
+AblationMode,Configuration,StepTimeMs,WorkloadReductionVsConfigAPct
+1,A: Distance Only,1.430,0.00
+2,B: Distance + Visibility,1.095,23.45
+3,C: Distance + Visibility + Interaction,0.968,32.30
+4,D: Full 4-Factor (Distance+Vis+Inter+Density),1.165,18.50

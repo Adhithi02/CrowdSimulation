@@ -1,0 +1,5 @@
+AgentCount,TheoreticalBudget_AllPairs,ActualEntriesTraversed,ActualDistanceChecks,ActualCollisionPairs,ChecksEliminatedPct,Explanation
+500,124750,17558,8609,154,93.10,Directly_Measured_Undirected_Pairs
+1000,499500,67615,33299,669,93.33,Directly_Measured_Undirected_Pairs
+2500,3123750,427253,212731,4000,93.19,Directly_Measured_Undirected_Pairs
+5000,12497500,1714614,855629,15931,93.15,Directly_Measured_Undirected_Pairs

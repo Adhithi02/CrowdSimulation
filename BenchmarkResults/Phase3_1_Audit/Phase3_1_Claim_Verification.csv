@@ -1,0 +1,19 @@
+Claim,Classification,Evidence_and_Audit_Notes
+AgentGPU struct is 80 bytes with 8-byte alignment,Verified by source inspection,"CrowdCommon.h L13-27: sizeof(AgentGPU)=80, alignof=8. Verified at runtime via GPUMemoryInfo."
+CPU Brute Force scales as O(N^2),Verified by executed test,500: 83.81ms -> 1000: 429.08ms (5.12x) -> 2500: 2603.58ms (6.07x). Quadratic growth confirmed.
+CPU Brute Force at 5000 exceeds 10s timeout,Verified by executed test,"Trial 1 timed out at >10,000ms. Correctly labeled TIMEOUT with 0 completed trials."
+CPU Spatial Hash algorithmic speedup over CPU BF is 13x-16x,Measured empirically,N=500: 14.39x; N=1000: 13.10x; N=2500: 16.08x. Corrected from report to include N=1000.
+CUDA pure speedup over CPU Spatial Hash is 11.5x-180.7x,Measured empirically,N=500: 11.45x; N=1000: 7.40x; N=2500: 22.29x; N=5000: 180.66x (total pipeline).
+CUDA compound speedup over CPU BF reaches 164.7x-358.3x,Measured empirically,N=500: 164.68x; N=1000: 96.90x; N=2500: 358.31x. N=5000 is TIMEOUT.
+Spatial hash had 0 dropped insertions across all trials,Verified by executed test,"Overflow telemetry confirmed 0 dropped across all 20 trials for N=500, 1000, 2500, 5000."
+Spatial hash overflowed entries at 2500 and 5000 are all stored in secondary tier,Verified by executed test,N=2500: 541 overflows stored; N=5000: 2825 overflows stored. All <= 80 bucket cap.
+Structure-of-Arrays (SoA) achieves 2.36x-2.99x solver speedup,Measured empirically,Kernel-only benchmark: 500: 2.36x; 1000: 2.57x; 2500: 2.99x; 5000: 2.91x. Coalesced access confirmed.
+PBD convergence is monotonic in average penetration,Measured empirically,1 iter: 0.3304m -> 2 iter: 0.3237m -> 4 iter: 0.3090m -> 8 iter: 0.2741m -> 12 iter: 0.2393m -> 16 iter: 0.2078m (37.12% reduction).
+PBD convergence is monotonic in maximum penetration,Measured empirically,1 iter: 0.9612m -> 2 iter: 0.9428m -> 4 iter: 0.9017m -> 8 iter: 0.8586m -> 12 iter: 0.8252m -> 16 iter: 0.7980m (16.97% reduction).
+Exp A vs Exp B timing discrepancy,Hypothesized (Unverified by continuous sensor telemetry),Plausible physical explanation: Exp A ran after 57s continuous CPU load on shared laptop cooling; Exp B ran pure GPU. Standalone compare_ab confirmed identical call logic.
+Exp A vs Exp D timing difference at 2500 agents,Unresolved empirical discrepancy across separate runs,Exp D was pure GPU; 16 iters=5.40ms (~0.34ms/iter) vs Exp A 3 iters=5.69ms. Runs occurred under different test conditions; documented as-is.
+Visibility-based LOD is experimentally validated by standalone benchmark,Unverified in CLI (Refuted by audit),REFUTED: hasFrustumPlanes=0 in benchmark; visScore defaulted to 1.0 for all agents. View frustum culling requires live Unity runtime.
+Distance Interaction and Density LOD factors are validated,Measured empirically,Mode 1 (DistOnly) reduced HIGH to 1387 (55.5%); Mode 3 demoted 576 agents based on contact count.
+VRAM total allocated is 3561.51 KiB (3.65 MB),Verified by source inspection,"Exact byte count = 3,646,984 bytes = 3,561.51 KiB (3.48 MiB / 3.65 decimal MB). Reconciled with GetGPUMemoryInfo."
+CPU clock is monotonic and steady,Verified by executed test,MSVC <chrono>: high_resolution_clock is typedef for steady_clock; is_steady=1 backed by QueryPerformanceCounter.
+Unity runtime performance (FPS frame time host overhead),Not yet verified,Requires Unity Editor execution via PAGPPerformanceLab.cs. Documented with step-by-step instructions.

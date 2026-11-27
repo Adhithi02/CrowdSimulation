@@ -1,0 +1,6 @@
+Scenario,AgentCount,ThresholdRadius,TotalReferenceBFPairs,TotalCPUSHPairs,TotalCUDASHPairs,MissingPairsCPU,ExtraPairsCPU,MissingPairsCUDA,ExtraPairsCUDA,DuplicatePairsCUDA,ExactMatchConfirmed
+Uniform_1000,1000,1.00,649,649,649,0,0,0,0,0,YES
+DenseQueue_1000,1000,1.00,58259,58259,23492,0,0,34767,0,0,NO
+BoardingCluster_1000,1000,1.00,14537,14537,13625,0,0,912,0,0,NO
+ForcedHashCollision_80,80,1.00,245,245,245,0,0,0,0,0,YES
+OverloadedCell_Stress_200,200,1.00,3572,3572,1324,0,0,2248,0,0,NO
